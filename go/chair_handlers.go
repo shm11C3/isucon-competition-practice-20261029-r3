@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/oklog/ulid/v2"
 )
@@ -105,68 +106,53 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 
 	chair := ctx.Value("chair").(*Chair)
 
-	tx, err := db.Beginx()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	defer tx.Rollback()
-
+	// A chair posts its coordinates one at a time, so the ride lookup, the
+	// status insert and the position upsert need no shared transaction: each
+	// statement commits on its own, which cuts the round trips of every tick.
+	ride := struct {
+		ID                   string         `db:"id"`
+		UserID               string         `db:"user_id"`
+		PickupLatitude       int            `db:"pickup_latitude"`
+		PickupLongitude      int            `db:"pickup_longitude"`
+		DestinationLatitude  int            `db:"destination_latitude"`
+		DestinationLongitude int            `db:"destination_longitude"`
+		Status               sql.NullString `db:"status"`
+	}{}
 	statusChanged := false
-	ride := &Ride{}
-	if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
+	if err := db.GetContext(ctx, &ride, `
+SELECT r.id, r.user_id, r.pickup_latitude, r.pickup_longitude, r.destination_latitude, r.destination_longitude,
+       (SELECT rs.status FROM ride_statuses rs WHERE rs.ride_id = r.id ORDER BY rs.created_at DESC LIMIT 1) AS status
+FROM rides r WHERE r.chair_id = ? ORDER BY r.updated_at DESC LIMIT 1`, chair.ID); err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
 	} else {
-		status, err := getLatestRideStatus(ctx, tx, ride.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
+		next := ""
+		if req.Latitude == ride.PickupLatitude && req.Longitude == ride.PickupLongitude && ride.Status.String == "ENROUTE" {
+			next = "PICKUP"
+		} else if req.Latitude == ride.DestinationLatitude && req.Longitude == ride.DestinationLongitude && ride.Status.String == "CARRYING" {
+			next = "ARRIVED"
 		}
-		if status != "COMPLETED" && status != "CANCELED" {
-			if req.Latitude == ride.PickupLatitude && req.Longitude == ride.PickupLongitude && status == "ENROUTE" {
-				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "PICKUP"); err != nil {
-					writeError(w, http.StatusInternalServerError, err)
-					return
-				}
-				statusChanged = true
+		if next != "" {
+			if _, err := db.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, next); err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
 			}
-
-			if req.Latitude == ride.DestinationLatitude && req.Longitude == ride.DestinationLongitude && status == "CARRYING" {
-				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "ARRIVED"); err != nil {
-					writeError(w, http.StatusInternalServerError, err)
-					return
-				}
-				statusChanged = true
-			}
+			statusChanged = true
 		}
 	}
 
-	// Record the coordinate after the ride queries, close to its commit. A slow
-	// lookup must not backdate a position that other requests cannot see yet.
-	chairLocationID := ulid.Make().String()
-	if _, err := tx.ExecContext(
-		ctx,
-		`INSERT INTO chair_locations (id, chair_id, latitude, longitude) VALUES (?, ?, ?, ?)`,
-		chairLocationID, chair.ID, req.Latitude, req.Longitude,
-	); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	location := &ChairLocation{}
-	if err := tx.GetContext(ctx, location, `SELECT * FROM chair_locations WHERE id = ?`, chairLocationID); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
+	// Timestamp the coordinate after the ride lookup, right before it becomes
+	// visible: a slow lookup must not backdate a position. The value is stored
+	// and returned as is, so owners see the same time the chair was told.
+	recordedAt := time.Now().Truncate(time.Microsecond)
 
 	// One upsert keeps the running total without a locking read: a FOR UPDATE on a
 	// missing row takes a gap lock, and two new chairs posting their first
 	// coordinate at once deadlocked (R1 T-0011: bursts of 500 on this endpoint).
 	// MySQL evaluates the assignments left to right, so the distance uses the old position.
-	if _, err := tx.ExecContext(
+	if _, err := db.ExecContext(
 		ctx,
 		`INSERT INTO chair_distances (chair_id, total_distance, total_distance_updated_at, latitude, longitude) VALUES (?, 0, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
@@ -174,22 +160,18 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 			total_distance_updated_at = VALUES(total_distance_updated_at),
 			latitude = VALUES(latitude),
 			longitude = VALUES(longitude)`,
-		chair.ID, location.CreatedAt, location.Latitude, location.Longitude,
+		chair.ID, recordedAt, req.Latitude, req.Longitude,
 	); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
-	if err := tx.Commit(); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
 	if statusChanged {
 		notify("c:"+chair.ID, "u:"+ride.UserID)
 	}
 
 	writeJSON(w, http.StatusOK, &chairPostCoordinateResponse{
-		RecordedAt: location.CreatedAt.UnixMilli(),
+		RecordedAt: recordedAt.UnixMilli(),
 	})
 }
 
