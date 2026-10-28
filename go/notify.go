@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,6 +80,59 @@ func notify(keys ...string) {
 	}
 }
 
+// The frontend leaves its first fetch stream open when it switches to
+// EventSource, and nginx may send the two to different hosts. Streams of one
+// key share the database's sent cursor, so the older one could take a status
+// the newer one never shows: a new stream ends every other stream of its key
+// on all hosts before it reads anything.
+var (
+	streamsMu sync.Mutex
+	streams   = map[string]map[string]context.CancelFunc{}
+)
+
+func supersedeLocal(key, keep string) {
+	streamsMu.Lock()
+	for id, cancel := range streams[key] {
+		if id != keep {
+			cancel()
+		}
+	}
+	streamsMu.Unlock()
+}
+
+func supersede(key, keep string) {
+	peers := strings.Split(os.Getenv("ISURIDE_PEERS"), ",")
+	if len(peers) == 1 && peers[0] == "" {
+		supersedeLocal(key, keep)
+		return
+	}
+	var wg sync.WaitGroup
+	for _, peer := range peers {
+		wg.Add(1)
+		go func(peer string) {
+			defer wg.Done()
+			res, err := peerClient.Post("http://"+peer+"/api/internal/supersede", "text/plain", strings.NewReader(key+"\n"+keep))
+			if err != nil {
+				return
+			}
+			io.Copy(io.Discard, res.Body)
+			res.Body.Close()
+		}(peer)
+	}
+	wg.Wait()
+}
+
+func internalPostSupersede(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	key, keep, _ := strings.Cut(string(body), "\n")
+	supersedeLocal(key, keep)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func internalPostNotify(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -99,6 +155,27 @@ func streamNotifications(w http.ResponseWriter, r *http.Request, key string, onc
 		writeError(w, http.StatusInternalServerError, errors.New("streaming unsupported"))
 		return
 	}
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	idBytes := make([]byte, 8)
+	rand.Read(idBytes)
+	id := hex.EncodeToString(idBytes)
+	streamsMu.Lock()
+	if streams[key] == nil {
+		streams[key] = map[string]context.CancelFunc{}
+	}
+	streams[key][id] = cancel
+	streamsMu.Unlock()
+	defer func() {
+		streamsMu.Lock()
+		delete(streams[key], id)
+		if len(streams[key]) == 0 {
+			delete(streams, key)
+		}
+		streamsMu.Unlock()
+	}()
+	supersede(key, id)
+
 	wake := subscribe(key)
 	defer unsubscribe(key, wake)
 
@@ -109,11 +186,13 @@ func streamNotifications(w http.ResponseWriter, r *http.Request, key string, onc
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	ctx := r.Context()
 	deadline := time.Now().Add(25 * time.Second)
 	last := ""
 	first := true
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		data, current, sent, err := once()
 		if err != nil {
 			if ctx.Err() == nil {

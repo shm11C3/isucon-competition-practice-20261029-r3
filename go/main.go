@@ -110,6 +110,7 @@ func setup() http.Handler {
 	{
 		mux.HandleFunc("GET /api/internal/matching", internalGetMatching)
 		mux.HandleFunc("POST /api/internal/notify", internalPostNotify)
+		mux.HandleFunc("POST /api/internal/supersede", internalPostSupersede)
 	}
 
 	return mux
