@@ -155,3 +155,4 @@ CREATE INDEX idx_rides_user_created ON rides (user_id, created_at);
 CREATE INDEX idx_ride_statuses_ride_created ON ride_statuses (ride_id, created_at);
 CREATE INDEX idx_coupons_used_by ON coupons (used_by);
 CREATE INDEX idx_coupons_code ON coupons (code);
+CREATE INDEX idx_rides_chair_evaluation ON rides (chair_id, evaluation);
