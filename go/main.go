@@ -75,8 +75,8 @@ func setup() http.Handler {
 	_flushDB.SetMaxIdleConns(2)
 	flushDB = _flushDB
 	startCoordinateFlusher()
-	db.SetMaxOpenConns(64)
-	db.SetMaxIdleConns(64)
+	db.SetMaxOpenConns(128)
+	db.SetMaxIdleConns(128)
 
 	mux := chi.NewRouter()
 	mux.Use(middleware.Recoverer)
