@@ -149,6 +149,36 @@ func internalPostSupersede(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// clearAuthCache drops cached access tokens on every app host and returns once
+// they all answered, so no host authenticates a token of the previous run.
+func clearAuthCache() {
+	peers := strings.Split(os.Getenv("ISURIDE_PEERS"), ",")
+	if len(peers) == 1 && peers[0] == "" {
+		clearAuthCacheLocal()
+		return
+	}
+	var wg sync.WaitGroup
+	for _, peer := range peers {
+		wg.Add(1)
+		go func(peer string) {
+			defer wg.Done()
+			res, err := peerClient.Post("http://"+peer+"/api/internal/authclear", "text/plain", nil)
+			if err != nil {
+				return
+			}
+			io.Copy(io.Discard, res.Body)
+			res.Body.Close()
+		}(peer)
+	}
+	wg.Wait()
+	clearAuthCacheLocal()
+}
+
+func internalPostAuthClear(w http.ResponseWriter, r *http.Request) {
+	clearAuthCacheLocal()
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func internalPostNotify(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
