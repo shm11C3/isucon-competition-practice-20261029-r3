@@ -860,11 +860,13 @@ func appGetNearbyChairs(w http.ResponseWriter, r *http.Request) {
 		FROM chairs c
 		JOIN chair_distances cd ON cd.chair_id = c.id
 		WHERE c.is_active = TRUE
+		  AND ABS(cd.latitude - ?) + ABS(cd.longitude - ?) <= ?
 		  AND NOT EXISTS (
 		    SELECT 1 FROM rides r
 		    WHERE r.chair_id = c.id AND r.evaluation IS NULL
 		  )
 		ORDER BY c.id`,
+		coordinate.Latitude, coordinate.Longitude, distance,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -886,16 +888,8 @@ func appGetNearbyChairs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	retrievedAt := &time.Time{}
-	err = db.GetContext(
-		ctx,
-		retrievedAt,
-		`SELECT CURRENT_TIMESTAMP(6)`,
-	)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
+	// The app hosts and isu14c share one NTP-synchronized clock.
+	retrievedAt := time.Now()
 
 	writeJSON(w, http.StatusOK, &appGetNearbyChairsResponse{
 		Chairs:      nearbyChairs,
