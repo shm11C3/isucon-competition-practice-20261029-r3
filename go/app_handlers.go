@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/go-sql-driver/mysql"
 	"net/http"
 	"strconv"
 	"time"
@@ -41,84 +42,92 @@ func appPostUsers(w http.ResponseWriter, r *http.Request) {
 	accessToken := secureRandomStr(32)
 	invitationCode := secureRandomStr(15)
 
-	tx, err := db.Beginx()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	defer tx.Rollback()
-
-	_, err = tx.ExecContext(
-		ctx,
-		"INSERT INTO users (id, username, firstname, lastname, date_of_birth, access_token, invitation_code) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		userID, req.Username, req.FirstName, req.LastName, req.DateOfBirth, accessToken, invitationCode,
-	)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	// 初回登録キャンペーンのクーポンを付与
-	_, err = tx.ExecContext(
-		ctx,
-		"INSERT INTO coupons (user_id, code, discount) VALUES (?, ?, ?)",
-		userID, "CP_NEW2024", 3000,
-	)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	// 招待コードを使った登録
-	if req.InvitationCode != nil && *req.InvitationCode != "" {
-		// 招待する側の招待数をチェック
-		var coupons []Coupon
-		err = tx.SelectContext(ctx, &coupons, "SELECT * FROM coupons WHERE code = ? FOR UPDATE", "INV_"+*req.InvitationCode)
+	// Registrations with one invitation code lock the same coupons gap
+	// (SELECT ... FOR UPDATE) and then insert into it, so concurrent ones can
+	// deadlock; MySQL rolls one back, and running it again is safe.
+	register := func() (int, error) {
+		tx, err := db.Beginx()
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
+			return http.StatusInternalServerError, err
 		}
-		if len(coupons) >= 3 {
-			writeError(w, http.StatusBadRequest, errors.New("この招待コードは使用できません。"))
-			return
-		}
+		defer tx.Rollback()
 
-		// ユーザーチェック
-		var inviter User
-		err = tx.GetContext(ctx, &inviter, "SELECT * FROM users WHERE invitation_code = ?", *req.InvitationCode)
+		_, err = tx.ExecContext(
+			ctx,
+			"INSERT INTO users (id, username, firstname, lastname, date_of_birth, access_token, invitation_code) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			userID, req.Username, req.FirstName, req.LastName, req.DateOfBirth, accessToken, invitationCode,
+		)
 		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				writeError(w, http.StatusBadRequest, errors.New("この招待コードは使用できません。"))
-				return
-			}
-			writeError(w, http.StatusInternalServerError, err)
-			return
+			return http.StatusInternalServerError, err
 		}
 
-		// 招待クーポン付与
+		// 初回登録キャンペーンのクーポンを付与
 		_, err = tx.ExecContext(
 			ctx,
 			"INSERT INTO coupons (user_id, code, discount) VALUES (?, ?, ?)",
-			userID, "INV_"+*req.InvitationCode, 1500,
+			userID, "CP_NEW2024", 3000,
 		)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
+			return http.StatusInternalServerError, err
 		}
-		// 招待した人にもRewardを付与
-		_, err = tx.ExecContext(
-			ctx,
-			"INSERT INTO coupons (user_id, code, discount) VALUES (?, CONCAT(?, '_', FLOOR(UNIX_TIMESTAMP(NOW(3))*1000)), ?)",
-			inviter.ID, "RWD_"+*req.InvitationCode, 1000,
-		)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-	}
 
-	if err := tx.Commit(); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		// 招待コードを使った登録
+		if req.InvitationCode != nil && *req.InvitationCode != "" {
+			// 招待する側の招待数をチェック
+			var coupons []Coupon
+			err = tx.SelectContext(ctx, &coupons, "SELECT * FROM coupons WHERE code = ? FOR UPDATE", "INV_"+*req.InvitationCode)
+			if err != nil {
+				return http.StatusInternalServerError, err
+			}
+			if len(coupons) >= 3 {
+				return http.StatusBadRequest, errors.New("この招待コードは使用できません。")
+			}
+
+			// ユーザーチェック
+			var inviter User
+			err = tx.GetContext(ctx, &inviter, "SELECT * FROM users WHERE invitation_code = ?", *req.InvitationCode)
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return http.StatusBadRequest, errors.New("この招待コードは使用できません。")
+				}
+				return http.StatusInternalServerError, err
+			}
+
+			// 招待クーポン付与
+			_, err = tx.ExecContext(
+				ctx,
+				"INSERT INTO coupons (user_id, code, discount) VALUES (?, ?, ?)",
+				userID, "INV_"+*req.InvitationCode, 1500,
+			)
+			if err != nil {
+				return http.StatusInternalServerError, err
+			}
+			// 招待した人にもRewardを付与
+			_, err = tx.ExecContext(
+				ctx,
+				"INSERT INTO coupons (user_id, code, discount) VALUES (?, CONCAT(?, '_', FLOOR(UNIX_TIMESTAMP(NOW(3))*1000)), ?)",
+				inviter.ID, "RWD_"+*req.InvitationCode, 1000,
+			)
+			if err != nil {
+				return http.StatusInternalServerError, err
+			}
+		}
+
+		if err := tx.Commit(); err != nil {
+			return http.StatusInternalServerError, err
+		}
+		return 0, nil
+	}
+	for attempt := 0; ; attempt++ {
+		status, err := register()
+		if err == nil {
+			break
+		}
+		var mysqlErr *mysql.MySQLError
+		if errors.As(err, &mysqlErr) && mysqlErr.Number == 1213 && attempt < 5 {
+			continue
+		}
+		writeError(w, status, err)
 		return
 	}
 
