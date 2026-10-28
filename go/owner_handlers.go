@@ -102,17 +102,24 @@ func ownerGetSales(w http.ResponseWriter, r *http.Request) {
 
 	owner := r.Context().Value("owner").(*Owner)
 
-	tx, err := db.Beginx()
-	if err != nil {
+	// One query for all of the owner's chairs instead of one per chair.
+	chairs := []Chair{}
+	if err := db.SelectContext(ctx, &chairs, "SELECT * FROM chairs WHERE owner_id = ?", owner.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	defer tx.Rollback()
-
-	chairs := []Chair{}
-	if err := tx.SelectContext(ctx, &chairs, "SELECT * FROM chairs WHERE owner_id = ?", owner.ID); err != nil {
+	completed := []Ride{}
+	if err := db.SelectContext(ctx, &completed, `SELECT rides.* FROM rides
+		JOIN chairs ON chairs.id = rides.chair_id
+		JOIN ride_statuses ON rides.id = ride_statuses.ride_id
+		WHERE chairs.owner_id = ? AND ride_statuses.status = 'COMPLETED' AND rides.updated_at BETWEEN ? AND ? + INTERVAL 999 MICROSECOND`,
+		owner.ID, since, until); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	ridesByChair := map[string][]Ride{}
+	for _, ride := range completed {
+		ridesByChair[ride.ChairID.String] = append(ridesByChair[ride.ChairID.String], ride)
 	}
 
 	res := ownerGetSalesResponse{
@@ -121,13 +128,7 @@ func ownerGetSales(w http.ResponseWriter, r *http.Request) {
 
 	modelSalesByModel := map[string]int{}
 	for _, chair := range chairs {
-		rides := []Ride{}
-		if err := tx.SelectContext(ctx, &rides, "SELECT rides.* FROM rides JOIN ride_statuses ON rides.id = ride_statuses.ride_id WHERE chair_id = ? AND status = 'COMPLETED' AND updated_at BETWEEN ? AND ? + INTERVAL 999 MICROSECOND", chair.ID, since, until); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-
-		sales := sumSales(rides)
+		sales := sumSales(ridesByChair[chair.ID])
 		res.TotalSales += sales
 
 		res.Chairs = append(res.Chairs, chairSales{
