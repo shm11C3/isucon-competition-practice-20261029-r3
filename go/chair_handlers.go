@@ -200,24 +200,16 @@ type chairGetNotificationResponseData struct {
 
 func chairNotificationOnce(ctx context.Context, chair *Chair) (*chairGetNotificationResponseData, bool, bool, error) {
 
-	ride := &Ride{}
 	yetSentRideStatus := RideStatus{}
 	status := ""
 
-	if err := db.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
+	// 未送信のうち最古のステータス、なければ最新のステータスを決める
+	ride, rideStatuses, err := latestRideWithStatuses(ctx, db, `SELECT id FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, false, false, nil
 		}
 		return nil, false, false, err
-	}
-
-	// 未送信のうち最古のステータス、なければ最新のステータスを 1 クエリで決める
-	rideStatuses := []RideStatus{}
-	if err := db.SelectContext(ctx, &rideStatuses, `SELECT * FROM ride_statuses WHERE ride_id = ? ORDER BY created_at ASC`, ride.ID); err != nil {
-		return nil, false, false, err
-	}
-	if len(rideStatuses) == 0 {
-		return nil, false, false, sql.ErrNoRows
 	}
 	more := false
 	for i, rs := range rideStatuses {

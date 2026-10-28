@@ -665,8 +665,8 @@ func appNotificationOnce(ctx context.Context, user *User) (*appGetNotificationRe
 	}
 	defer tx.Rollback()
 
-	ride := &Ride{}
-	if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE user_id = ? ORDER BY created_at DESC LIMIT 1`, user.ID); err != nil {
+	ride, rideStatuses, err := latestRideWithStatuses(ctx, tx, `SELECT id FROM rides WHERE user_id = ? ORDER BY created_at DESC LIMIT 1`, user.ID)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, false, false, nil
 		}
@@ -675,14 +675,7 @@ func appNotificationOnce(ctx context.Context, user *User) (*appGetNotificationRe
 
 	yetSentRideStatus := RideStatus{}
 	status := ""
-	// 未送信のうち最古のステータス、なければ最新のステータスを 1 クエリで決める
-	rideStatuses := []RideStatus{}
-	if err := tx.SelectContext(ctx, &rideStatuses, `SELECT * FROM ride_statuses WHERE ride_id = ? ORDER BY created_at ASC`, ride.ID); err != nil {
-		return nil, false, false, err
-	}
-	if len(rideStatuses) == 0 {
-		return nil, false, false, sql.ErrNoRows
-	}
+	// 未送信のうち最古のステータス、なければ最新のステータスを決める
 	more := false
 	for i, rs := range rideStatuses {
 		if rs.AppSentAt == nil {
