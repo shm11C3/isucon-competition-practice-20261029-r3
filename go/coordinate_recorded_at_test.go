@@ -30,6 +30,7 @@ func TestCoordinateRecordedAtAfterDelayedRideLookup(t *testing.T) {
 	defer func() { db = previous }()
 	const chairID = "repair-nearby-clock-test"
 	defer fixture.Exec("DELETE FROM chair_locations WHERE chair_id = ?", chairID)
+	defer fixture.Exec("DELETE FROM chair_distances WHERE chair_id = ?", chairID)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
