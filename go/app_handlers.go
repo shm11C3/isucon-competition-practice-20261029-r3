@@ -313,11 +313,22 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	// 最新ステータスが COMPLETED でないライドの数
-	continuingRideCount := 0
-	if err := tx.GetContext(ctx, &continuingRideCount, `SELECT COUNT(*) FROM rides r WHERE r.user_id = ? AND IFNULL((SELECT rs.status FROM ride_statuses rs WHERE rs.ride_id = r.id ORDER BY rs.created_at DESC LIMIT 1), '') <> 'COMPLETED'`, user.ID); err != nil {
+	rides := []Ride{}
+	if err := tx.SelectContext(ctx, &rides, `SELECT * FROM rides WHERE user_id = ?`, user.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+
+	continuingRideCount := 0
+	for _, ride := range rides {
+		status, err := getLatestRideStatus(ctx, tx, ride.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if status != "COMPLETED" {
+			continuingRideCount++
+		}
 	}
 
 	if continuingRideCount > 0 {
@@ -662,7 +673,7 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 	if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE user_id = ? ORDER BY created_at DESC LIMIT 1`, user.ID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeJSON(w, http.StatusOK, &appGetNotificationResponse{
-				RetryAfterMs: 500,
+				RetryAfterMs: 30,
 			})
 			return
 		}
@@ -672,26 +683,19 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 
 	yetSentRideStatus := RideStatus{}
 	status := ""
-	// 未送信のうち最古のステータス、なければ最新のステータスを 1 クエリで決める
-	rideStatuses := []RideStatus{}
-	if err := tx.SelectContext(ctx, &rideStatuses, `SELECT * FROM ride_statuses WHERE ride_id = ? ORDER BY created_at ASC`, ride.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if len(rideStatuses) == 0 {
-		writeError(w, http.StatusInternalServerError, sql.ErrNoRows)
-		return
-	}
-	for _, rs := range rideStatuses {
-		if rs.AppSentAt == nil {
-			yetSentRideStatus = rs
-			break
+	if err := tx.GetContext(ctx, &yetSentRideStatus, `SELECT * FROM ride_statuses WHERE ride_id = ? AND app_sent_at IS NULL ORDER BY created_at ASC LIMIT 1`, ride.ID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			status, err = getLatestRideStatus(ctx, tx, ride.ID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+		} else {
+			writeError(w, http.StatusInternalServerError, err)
+			return
 		}
-	}
-	if yetSentRideStatus.ID != "" {
-		status = yetSentRideStatus.Status
 	} else {
-		status = rideStatuses[len(rideStatuses)-1].Status
+		status = yetSentRideStatus.Status
 	}
 
 	fare, err := calculateDiscountedFare(ctx, tx, user.ID, ride, ride.PickupLatitude, ride.PickupLongitude, ride.DestinationLatitude, ride.DestinationLongitude)
@@ -716,7 +720,7 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 			CreatedAt: ride.CreatedAt.UnixMilli(),
 			UpdateAt:  ride.UpdatedAt.UnixMilli(),
 		},
-		RetryAfterMs: 500,
+		RetryAfterMs: 30,
 	}
 
 	if ride.ChairID.Valid {
@@ -759,26 +763,57 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 func getChairStats(ctx context.Context, tx *sqlx.Tx, chairID string) (appGetNotificationResponseChairStats, error) {
 	stats := appGetNotificationResponseChairStats{}
 
-	// CARRYING, ARRIVED, COMPLETED をすべて経たライドのみ集計する (元のループと同じ条件)
-	var agg struct {
-		Count int   `db:"cnt"`
-		Sum   int64 `db:"total"`
-	}
-	err := tx.GetContext(
+	rides := []Ride{}
+	err := tx.SelectContext(
 		ctx,
-		&agg,
-		`SELECT COUNT(*) AS cnt, IFNULL(SUM(r.evaluation), 0) AS total FROM rides r
-		 WHERE r.chair_id = ? AND r.evaluation IS NOT NULL
-		   AND (SELECT COUNT(DISTINCT rs.status) FROM ride_statuses rs WHERE rs.ride_id = r.id AND rs.status IN ('CARRYING', 'ARRIVED', 'COMPLETED')) = 3`,
+		&rides,
+		`SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC`,
 		chairID,
 	)
 	if err != nil {
 		return stats, err
 	}
 
-	stats.TotalRidesCount = agg.Count
-	if agg.Count > 0 {
-		stats.TotalEvaluationAvg = float64(agg.Sum) / float64(agg.Count)
+	totalRideCount := 0
+	totalEvaluation := 0.0
+	for _, ride := range rides {
+		rideStatuses := []RideStatus{}
+		err = tx.SelectContext(
+			ctx,
+			&rideStatuses,
+			`SELECT * FROM ride_statuses WHERE ride_id = ? ORDER BY created_at`,
+			ride.ID,
+		)
+		if err != nil {
+			return stats, err
+		}
+
+		var arrivedAt, pickupedAt *time.Time
+		var isCompleted bool
+		for _, status := range rideStatuses {
+			if status.Status == "ARRIVED" {
+				arrivedAt = &status.CreatedAt
+			} else if status.Status == "CARRYING" {
+				pickupedAt = &status.CreatedAt
+			}
+			if status.Status == "COMPLETED" {
+				isCompleted = true
+			}
+		}
+		if arrivedAt == nil || pickupedAt == nil {
+			continue
+		}
+		if !isCompleted {
+			continue
+		}
+
+		totalRideCount++
+		totalEvaluation += float64(*ride.Evaluation)
+	}
+
+	stats.TotalRidesCount = totalRideCount
+	if totalRideCount > 0 {
+		stats.TotalEvaluationAvg = totalEvaluation / float64(totalRideCount)
 	}
 
 	return stats, nil
@@ -829,29 +864,18 @@ func appGetNearbyChairs(w http.ResponseWriter, r *http.Request) {
 
 	coordinate := Coordinate{Latitude: lat, Longitude: lon}
 
-	// 稼働中で、全てのライドの最新ステータスが COMPLETED の椅子を、最新位置情報とともに取得する
-	type nearbyChairRow struct {
-		ID        string `db:"id"`
-		Name      string `db:"name"`
-		Model     string `db:"model"`
-		Latitude  int    `db:"latitude"`
-		Longitude int    `db:"longitude"`
+	tx, err := db.Beginx()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
 	}
-	rows := []nearbyChairRow{}
-	err = db.SelectContext(
+	defer tx.Rollback()
+
+	chairs := []Chair{}
+	err = tx.SelectContext(
 		ctx,
-		&rows,
-		// chair_distances holds each chair's latest coordinate; COMPLETED is written in the
-		// same transaction that sets rides.evaluation, so an unfinished ride has none.
-		`SELECT c.id, c.name, c.model, cd.latitude, cd.longitude
-		FROM chairs c
-		JOIN chair_distances cd ON cd.chair_id = c.id
-		WHERE c.is_active = TRUE
-		  AND NOT EXISTS (
-		    SELECT 1 FROM rides r
-		    WHERE r.chair_id = c.id AND r.evaluation IS NULL
-		  )
-		ORDER BY c.id`,
+		&chairs,
+		`SELECT * FROM chairs`,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -859,22 +883,65 @@ func appGetNearbyChairs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	nearbyChairs := []appGetNearbyChairsResponseChair{}
-	for _, row := range rows {
-		if calculateDistance(coordinate.Latitude, coordinate.Longitude, row.Latitude, row.Longitude) <= distance {
+	for _, chair := range chairs {
+		if !chair.IsActive {
+			continue
+		}
+
+		rides := []*Ride{}
+		if err := tx.SelectContext(ctx, &rides, `SELECT * FROM rides WHERE chair_id = ? ORDER BY created_at DESC`, chair.ID); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		skip := false
+		for _, ride := range rides {
+			// 過去にライドが存在し、かつ、それが完了していない場合はスキップ
+			status, err := getLatestRideStatus(ctx, tx, ride.ID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			if status != "COMPLETED" {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+
+		// 最新の位置情報を取得
+		chairLocation := &ChairLocation{}
+		err = tx.GetContext(
+			ctx,
+			chairLocation,
+			`SELECT * FROM chair_locations WHERE chair_id = ? ORDER BY created_at DESC LIMIT 1`,
+			chair.ID,
+		)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		if calculateDistance(coordinate.Latitude, coordinate.Longitude, chairLocation.Latitude, chairLocation.Longitude) <= distance {
 			nearbyChairs = append(nearbyChairs, appGetNearbyChairsResponseChair{
-				ID:    row.ID,
-				Name:  row.Name,
-				Model: row.Model,
+				ID:    chair.ID,
+				Name:  chair.Name,
+				Model: chair.Model,
 				CurrentCoordinate: Coordinate{
-					Latitude:  row.Latitude,
-					Longitude: row.Longitude,
+					Latitude:  chairLocation.Latitude,
+					Longitude: chairLocation.Longitude,
 				},
 			})
 		}
 	}
 
 	retrievedAt := &time.Time{}
-	err = db.GetContext(
+	err = tx.GetContext(
 		ctx,
 		retrievedAt,
 		`SELECT CURRENT_TIMESTAMP(6)`,

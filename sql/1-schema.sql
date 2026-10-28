@@ -48,18 +48,6 @@ CREATE TABLE chair_locations
 )
   COMMENT = '椅子の現在位置情報テーブル';
 
-DROP TABLE IF EXISTS chair_distances;
-CREATE TABLE chair_distances
-(
-  chair_id                  VARCHAR(26) NOT NULL COMMENT '椅子ID',
-  total_distance            INTEGER     NOT NULL COMMENT '総移動距離',
-  total_distance_updated_at DATETIME(6) NOT NULL COMMENT '最新位置の登録日時',
-  latitude                  INTEGER     NOT NULL COMMENT '最新位置の経度',
-  longitude                 INTEGER     NOT NULL COMMENT '最新位置の緯度',
-  PRIMARY KEY (chair_id)
-)
-  COMMENT = '椅子の総移動距離テーブル';
-
 DROP TABLE IF EXISTS users;
 CREATE TABLE users
 (
@@ -146,15 +134,3 @@ CREATE TABLE coupons
   PRIMARY KEY (user_id, code)
 )
   COMMENT 'クーポンテーブル';
-
-CREATE INDEX idx_chairs_access_token ON chairs (access_token);
-CREATE INDEX idx_chairs_owner_id ON chairs (owner_id);
-CREATE INDEX idx_chair_locations_chair_created ON chair_locations (chair_id, created_at);
-CREATE INDEX idx_rides_chair_updated ON rides (chair_id, updated_at);
-CREATE INDEX idx_rides_user_created ON rides (user_id, created_at);
-CREATE INDEX idx_ride_statuses_ride_created ON ride_statuses (ride_id, created_at);
-CREATE INDEX idx_coupons_used_by ON coupons (used_by);
-CREATE INDEX idx_coupons_code ON coupons (code);
-CREATE INDEX idx_rides_chair_evaluation ON rides (chair_id, evaluation);
-CREATE INDEX idx_rides_evaluation_chair ON rides (evaluation, chair_id);
-CREATE INDEX idx_ride_statuses_chair_sent ON ride_statuses (chair_sent_at);

@@ -1,6 +1,6 @@
-# ISUCON14 simulation R2: inherited contest harness
+# ISUCON14 simulation R3: inherited contest harness
 
-Source: official `isucon/isucon14` commit `53f8b627e040c30ebec600457c6c97da008b84b0`, `webapp/go`, `webapp/sql`, and `webapp/openapi.yaml`, preserved without application improvements.
+Source: official `isucon/isucon14` commit `53f8b627e040c30ebec600457c6c97da008b84b0`, `webapp/go`, `webapp/sql`, and `webapp/openapi.yaml`, preserved as the initial R3 application baseline.
 
 References:
 - https://github.com/isucon/isucon14/blob/main/docs/manual.md

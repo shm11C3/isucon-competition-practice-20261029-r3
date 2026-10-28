@@ -10,7 +10,7 @@ fi
 if test -f /home/isucon/env.sh; then
 	. /home/isucon/env.sh
 fi
-# The shared database host for the three-server layout overrides env.sh.
+# Shared R3 database host is supplied by the deployed host overlay.
 if test -f /etc/isuride/db.env; then
 	. /etc/isuride/db.env
 fi
@@ -39,9 +39,3 @@ gzip -dkc 3-initial-data.sql.gz | mysql -u"$ISUCON_DB_USER" \
 		--host "$ISUCON_DB_HOST" \
 		--port "$ISUCON_DB_PORT" \
 		"$ISUCON_DB_NAME"
-
-mysql -u"$ISUCON_DB_USER" \
-		-p"$ISUCON_DB_PASSWORD" \
-		--host "$ISUCON_DB_HOST" \
-		--port "$ISUCON_DB_PORT" \
-		"$ISUCON_DB_NAME" < 4-chair-distances.sql
