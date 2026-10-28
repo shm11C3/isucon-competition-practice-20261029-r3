@@ -195,7 +195,7 @@ func internalPostNotify(w http.ResponseWriter, r *http.Request) {
 // marked an unsent status as sent; a marked status is followed by another read
 // at once so a backlog drains in order. The stream ends well before the
 // client's 60 s timeout; the client reconnects.
-func streamNotifications(w http.ResponseWriter, r *http.Request, key string, once func() (any, string, bool, error)) {
+func streamNotifications(w http.ResponseWriter, r *http.Request, key string, once func() (any, string, bool, bool, error)) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, errors.New("streaming unsupported"))
@@ -241,7 +241,7 @@ func streamNotifications(w http.ResponseWriter, r *http.Request, key string, onc
 		if ctx.Err() != nil {
 			return
 		}
-		data, current, sent, err := once()
+		data, current, sent, more, err := once()
 		if err != nil {
 			if ctx.Err() == nil {
 				slog.Error("notification stream", "err", err)
@@ -266,7 +266,9 @@ func streamNotifications(w http.ResponseWriter, r *http.Request, key string, onc
 			flusher.Flush()
 			last = current
 		}
-		if sent {
+		// Read again at once only while unsent statuses remain; a status
+		// committed after this read wakes the stream instead.
+		if sent && more {
 			continue
 		}
 		if time.Now().After(deadline) {
