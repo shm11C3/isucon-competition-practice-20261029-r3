@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"time"
 )
 
 type freeChair struct {
@@ -12,7 +13,7 @@ type freeChair struct {
 }
 
 // このAPIをインスタンス内から一定間隔で叩かせることで、椅子とライドをマッチングさせる
-// 待ち時間の長いライドから順に、到着が最も早い空き椅子を割り当てる
+// 待ち時間が2秒以上のライドをFIFOで保護し、残りは近い候補から全体で配車する
 func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -59,30 +60,16 @@ WHERE c.is_active = TRUE`); err != nil {
 		}
 	}
 
-	used := make(map[string]bool, len(chairs))
-	for _, ride := range rides {
-		best := -1
-		bestTime := 0
-		for i, c := range chairs {
-			if used[c.ID] || c.Speed <= 0 {
-				continue
-			}
-			t := calculateDistance(c.Latitude, c.Longitude, ride.PickupLatitude, ride.PickupLongitude) * 1000 / c.Speed
-			if best < 0 || t < bestTime {
-				best, bestTime = i, t
-			}
-		}
-		if best < 0 {
-			break
-		}
-		res, err := db.ExecContext(ctx, "UPDATE rides SET chair_id = ? WHERE id = ? AND chair_id IS NULL", chairs[best].ID, ride.ID)
+	for _, pair := range selectAgeAwareChairMatches(rides, chairs, time.Now()) {
+		ride := rides[pair.rideIndex]
+		chair := chairs[pair.chairIndex]
+		res, err := db.ExecContext(ctx, "UPDATE rides SET chair_id = ? WHERE id = ? AND chair_id IS NULL", chair.ID, ride.ID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
 		if n, _ := res.RowsAffected(); n == 1 {
-			used[chairs[best].ID] = true
-			notify("c:"+chairs[best].ID, "u:"+ride.UserID)
+			notify("c:"+chair.ID, "u:"+ride.UserID)
 		}
 	}
 
