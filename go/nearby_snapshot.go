@@ -28,12 +28,17 @@ var (
 	freeChairsMu sync.Mutex
 	freeChairs   []nearbyChairRow
 	freeChairsAt time.Time
+	// freeChairsReadDone is when the read that produced freeChairs finished.
+	freeChairsReadDone time.Time
 )
 
 func freeChairSnapshot(ctx context.Context) ([]nearbyChairRow, time.Time, error) {
 	freeChairsMu.Lock()
 	defer freeChairsMu.Unlock()
-	if !freeChairsAt.IsZero() && time.Since(freeChairsAt) < freeChairSnapshotTTL {
+	// The TTL runs from the end of the last read: measured from its start, a
+	// read slower than the TTL left the list stale on arrival, so every waiting
+	// request read again in turn and nearby requests timed out (R3 T-0036).
+	if !freeChairsReadDone.IsZero() && time.Since(freeChairsReadDone) < freeChairSnapshotTTL {
 		return freeChairs, freeChairsAt, nil
 	}
 	at := time.Now()
@@ -85,13 +90,13 @@ func freeChairSnapshot(ctx context.Context) ([]nearbyChairRow, time.Time, error)
 			rows = append(rows, c)
 		}
 	}
-	freeChairs, freeChairsAt = rows, at
+	freeChairs, freeChairsAt, freeChairsReadDone = rows, at, time.Now()
 	return rows, at, nil
 }
 
 // dropFreeChairSnapshot forgets the list of the previous run at initialize.
 func dropFreeChairSnapshot() {
 	freeChairsMu.Lock()
-	freeChairs, freeChairsAt = nil, time.Time{}
+	freeChairs, freeChairsAt, freeChairsReadDone = nil, time.Time{}, time.Time{}
 	freeChairsMu.Unlock()
 }
