@@ -28,6 +28,7 @@ func clearAuthCacheLocal() {
 	authCache.Store(&authGeneration{})
 	dropPendingCoordinates()
 	clearStaticCacheLocal()
+	dropFreeChairSnapshot()
 }
 
 func appAuthMiddleware(next http.Handler) http.Handler {
