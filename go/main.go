@@ -65,6 +65,7 @@ func setup() http.Handler {
 		panic(err)
 	}
 	db = _db
+	startCoordinateFlusher()
 	db.SetMaxOpenConns(64)
 	db.SetMaxIdleConns(64)
 

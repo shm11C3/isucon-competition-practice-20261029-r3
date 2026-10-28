@@ -143,28 +143,12 @@ FROM rides r WHERE r.chair_id = ? ORDER BY r.updated_at DESC LIMIT 1`, chair.ID)
 		}
 	}
 
-	// Timestamp the coordinate after the ride lookup, right before it becomes
-	// visible: a slow lookup must not backdate a position. The value is stored
-	// and returned as is, so owners see the same time the chair was told.
+	// Timestamp the coordinate after the ride lookup: a slow lookup must not
+	// backdate a position. The value is stored and returned as is, so owners see
+	// the same time the chair was told (see coordinate_buffer.go).
 	recordedAt := time.Now().Truncate(time.Microsecond)
 
-	// One upsert keeps the running total without a locking read: a FOR UPDATE on a
-	// missing row takes a gap lock, and two new chairs posting their first
-	// coordinate at once deadlocked (R1 T-0011: bursts of 500 on this endpoint).
-	// MySQL evaluates the assignments left to right, so the distance uses the old position.
-	if _, err := db.ExecContext(
-		ctx,
-		`INSERT INTO chair_distances (chair_id, total_distance, total_distance_updated_at, latitude, longitude) VALUES (?, 0, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-			total_distance = total_distance + ABS(VALUES(latitude) - latitude) + ABS(VALUES(longitude) - longitude),
-			total_distance_updated_at = VALUES(total_distance_updated_at),
-			latitude = VALUES(latitude),
-			longitude = VALUES(longitude)`,
-		chair.ID, recordedAt, req.Latitude, req.Longitude,
-	); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
+	queueCoordinate(pendingCoordinate{chairID: chair.ID, recordedAt: recordedAt, latitude: req.Latitude, longitude: req.Longitude})
 
 	if statusChanged {
 		notify("c:"+chair.ID, "u:"+ride.UserID)
