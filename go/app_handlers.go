@@ -7,7 +7,6 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/oklog/ulid/v2"
@@ -855,30 +854,7 @@ func appGetNearbyChairs(w http.ResponseWriter, r *http.Request) {
 
 	coordinate := Coordinate{Latitude: lat, Longitude: lon}
 
-	// 稼働中で、全てのライドの最新ステータスが COMPLETED の椅子を、最新位置情報とともに取得する
-	type nearbyChairRow struct {
-		ID        string `db:"id"`
-		Name      string `db:"name"`
-		Model     string `db:"model"`
-		Latitude  int    `db:"latitude"`
-		Longitude int    `db:"longitude"`
-	}
-	rows := []nearbyChairRow{}
-	err = db.SelectContext(
-		ctx,
-		&rows,
-		// chair_distances holds each chair's latest coordinate; COMPLETED is written in the
-		// same transaction that sets rides.evaluation, so an unfinished ride has none.
-		`SELECT c.id, c.name, c.model, cd.latitude, cd.longitude
-		FROM chairs c
-		JOIN chair_distances cd ON cd.chair_id = c.id
-		WHERE c.is_active = TRUE
-		  AND NOT EXISTS (
-		    SELECT 1 FROM rides r
-		    WHERE r.chair_id = c.id AND r.evaluation IS NULL
-		  )
-		ORDER BY c.id`,
-	)
+	rows, snapshotAt, err := freeChairSnapshot(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -899,20 +875,9 @@ func appGetNearbyChairs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	retrievedAt := &time.Time{}
-	err = db.GetContext(
-		ctx,
-		retrievedAt,
-		`SELECT CURRENT_TIMESTAMP(6)`,
-	)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
 	writeJSON(w, http.StatusOK, &appGetNearbyChairsResponse{
 		Chairs:      nearbyChairs,
-		RetrievedAt: retrievedAt.UnixMilli(),
+		RetrievedAt: snapshotAt.UnixMilli(),
 	})
 }
 
