@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/jmoiron/sqlx"
 	"github.com/oklog/ulid/v2"
 )
 
@@ -659,13 +658,11 @@ type appGetNotificationResponseChairStats struct {
 
 func appNotificationOnce(ctx context.Context, user *User) (*appGetNotificationResponseData, bool, bool, error) {
 
-	tx, err := db.Beginx()
-	if err != nil {
-		return nil, false, false, err
-	}
-	defer tx.Rollback()
+	// The ride and its statuses come from one statement, so they share a
+	// snapshot; the only write is the app_sent_at UPDATE, and one stream per
+	// user marks statuses (supersede), so no transaction is needed.
 
-	ride, rideStatuses, err := latestRideWithStatuses(ctx, tx, `SELECT id FROM rides WHERE user_id = ? ORDER BY created_at DESC LIMIT 1`, user.ID)
+	ride, rideStatuses, err := latestRideWithStatuses(ctx, db, `SELECT id FROM rides WHERE user_id = ? ORDER BY created_at DESC LIMIT 1`, user.ID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, false, false, nil
@@ -699,7 +696,7 @@ func appNotificationOnce(ctx context.Context, user *User) (*appGetNotificationRe
 	if v, ok := fareByRide.Load(ride.ID); ok {
 		fare = v.(int)
 	} else {
-		fare, err = calculateDiscountedFare(ctx, tx, user.ID, ride, ride.PickupLatitude, ride.PickupLongitude, ride.DestinationLatitude, ride.DestinationLongitude)
+		fare, err = calculateDiscountedFare(ctx, db, user.ID, ride, ride.PickupLatitude, ride.PickupLongitude, ride.DestinationLatitude, ride.DestinationLongitude)
 		if err != nil {
 			return nil, false, false, err
 		}
@@ -726,7 +723,7 @@ func appNotificationOnce(ctx context.Context, user *User) (*appGetNotificationRe
 	}
 
 	if ride.ChairID.Valid {
-		chair, err := cachedChair(ctx, tx, ride.ChairID.String)
+		chair, err := cachedChair(ctx, db, ride.ChairID.String)
 		if err != nil {
 			return nil, false, false, err
 		}
@@ -739,7 +736,7 @@ func appNotificationOnce(ctx context.Context, user *User) (*appGetNotificationRe
 		if v, ok := statsByRide.Load(ride.ID); ok && status != "COMPLETED" {
 			stats = v.(appGetNotificationResponseChairStats)
 		} else {
-			stats, err = getChairStats(ctx, tx, chair.ID)
+			stats, err = getChairStats(ctx, db, chair.ID)
 			if err != nil {
 				return nil, false, false, err
 			}
@@ -757,14 +754,10 @@ func appNotificationOnce(ctx context.Context, user *User) (*appGetNotificationRe
 	}
 
 	if yetSentRideStatus.ID != "" {
-		_, err := tx.ExecContext(ctx, `UPDATE ride_statuses SET app_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, yetSentRideStatus.ID)
+		_, err := db.ExecContext(ctx, `UPDATE ride_statuses SET app_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, yetSentRideStatus.ID)
 		if err != nil {
 			return nil, false, false, err
 		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, false, false, err
 	}
 
 	return response.Data, yetSentRideStatus.ID != "", more, nil
@@ -786,7 +779,7 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func getChairStats(ctx context.Context, tx *sqlx.Tx, chairID string) (appGetNotificationResponseChairStats, error) {
+func getChairStats(ctx context.Context, tx executableGet, chairID string) (appGetNotificationResponseChairStats, error) {
 	stats := appGetNotificationResponseChairStats{}
 
 	// CARRYING, ARRIVED, COMPLETED をすべて経たライドのみ集計する (元のループと同じ条件)
@@ -891,7 +884,7 @@ func calculateFare(pickupLatitude, pickupLongitude, destLatitude, destLongitude 
 	return initialFare + meteredFare
 }
 
-func calculateDiscountedFare(ctx context.Context, tx *sqlx.Tx, userID string, ride *Ride, pickupLatitude, pickupLongitude, destLatitude, destLongitude int) (int, error) {
+func calculateDiscountedFare(ctx context.Context, tx executableGet, userID string, ride *Ride, pickupLatitude, pickupLongitude, destLatitude, destLongitude int) (int, error) {
 	var coupon Coupon
 	discount := 0
 	if ride != nil {
