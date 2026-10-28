@@ -10,6 +10,10 @@ fi
 if test -f /home/isucon/env.sh; then
 	. /home/isucon/env.sh
 fi
+# The shared database host for the three-server layout overrides env.sh.
+if test -f /etc/isuride/db.env; then
+	. /etc/isuride/db.env
+fi
 
 ISUCON_DB_HOST=${ISUCON_DB_HOST:-127.0.0.1}
 ISUCON_DB_PORT=${ISUCON_DB_PORT:-3306}
