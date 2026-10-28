@@ -84,20 +84,36 @@ func notify(keys ...string) {
 // EventSource, and nginx may send the two to different hosts. Streams of one
 // key share the database's sent cursor, so the older one could take a status
 // the newer one never shows: a new stream ends every other stream of its key
-// on all hosts before it reads anything.
+// on all hosts and waits for them to exit before it reads anything, so its
+// first event already reflects whatever the old stream consumed.
+type streamHandle struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
 var (
 	streamsMu sync.Mutex
-	streams   = map[string]map[string]context.CancelFunc{}
+	streams   = map[string]map[string]streamHandle{}
 )
 
 func supersedeLocal(key, keep string) {
 	streamsMu.Lock()
-	for id, cancel := range streams[key] {
+	var waits []chan struct{}
+	for id, h := range streams[key] {
 		if id != keep {
-			cancel()
+			h.cancel()
+			waits = append(waits, h.done)
 		}
 	}
 	streamsMu.Unlock()
+	timeout := time.After(time.Second)
+	for _, done := range waits {
+		select {
+		case <-done:
+		case <-timeout:
+			return
+		}
+	}
 }
 
 func supersede(key, keep string) {
@@ -160,13 +176,15 @@ func streamNotifications(w http.ResponseWriter, r *http.Request, key string, onc
 	idBytes := make([]byte, 8)
 	rand.Read(idBytes)
 	id := hex.EncodeToString(idBytes)
+	done := make(chan struct{})
 	streamsMu.Lock()
 	if streams[key] == nil {
-		streams[key] = map[string]context.CancelFunc{}
+		streams[key] = map[string]streamHandle{}
 	}
-	streams[key][id] = cancel
+	streams[key][id] = streamHandle{cancel: cancel, done: done}
 	streamsMu.Unlock()
 	defer func() {
+		close(done)
 		streamsMu.Lock()
 		delete(streams[key], id)
 		if len(streams[key]) == 0 {
