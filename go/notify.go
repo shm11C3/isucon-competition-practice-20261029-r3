@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	mrand "math/rand"
 	"net/http"
 	"os"
 	"strings"
@@ -234,7 +235,10 @@ func streamNotifications(w http.ResponseWriter, r *http.Request, key string, onc
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	deadline := time.Now().Add(25 * time.Second)
+	// Streams opened together at the start would all end and reconnect together,
+	// a burst of supersede calls and first reads; spread their ends over
+	// 30-50 s, still short of the client's 60 s timeout.
+	deadline := time.Now().Add(30*time.Second + time.Duration(mrand.Int63n(int64(20*time.Second))))
 	last := ""
 	first := true
 	for {
