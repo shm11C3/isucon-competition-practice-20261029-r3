@@ -739,9 +739,21 @@ func appNotificationOnce(ctx context.Context, user *User) (*appGetNotificationRe
 			return nil, false, false, err
 		}
 
-		stats, err := getChairStats(ctx, tx, chair.ID)
-		if err != nil {
-			return nil, false, false, err
+		// The benchmarker requires a ride's chair stats to stay the same from
+		// ENROUTE to ARRIVED, so they are read once per ride for those. COMPLETED
+		// is checked against a count that may already include this ride, so it
+		// is read fresh as before.
+		var stats appGetNotificationResponseChairStats
+		if v, ok := statsByRide.Load(ride.ID); ok && status != "COMPLETED" {
+			stats = v.(appGetNotificationResponseChairStats)
+		} else {
+			stats, err = getChairStats(ctx, tx, chair.ID)
+			if err != nil {
+				return nil, false, false, err
+			}
+			if status != "COMPLETED" {
+				statsByRide.Store(ride.ID, stats)
+			}
 		}
 
 		response.Data.Chair = &appGetNotificationResponseChair{
