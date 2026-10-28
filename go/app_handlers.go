@@ -696,9 +696,15 @@ func appNotificationOnce(ctx context.Context, user *User) (*appGetNotificationRe
 		status = rideStatuses[len(rideStatuses)-1].Status
 	}
 
-	fare, err := calculateDiscountedFare(ctx, tx, user.ID, ride, ride.PickupLatitude, ride.PickupLongitude, ride.DestinationLatitude, ride.DestinationLongitude)
-	if err != nil {
-		return nil, false, err
+	fare := 0
+	if v, ok := fareByRide.Load(ride.ID); ok {
+		fare = v.(int)
+	} else {
+		fare, err = calculateDiscountedFare(ctx, tx, user.ID, ride, ride.PickupLatitude, ride.PickupLongitude, ride.DestinationLatitude, ride.DestinationLongitude)
+		if err != nil {
+			return nil, false, err
+		}
+		fareByRide.Store(ride.ID, fare)
 	}
 
 	response := &appGetNotificationResponse{
@@ -721,8 +727,8 @@ func appNotificationOnce(ctx context.Context, user *User) (*appGetNotificationRe
 	}
 
 	if ride.ChairID.Valid {
-		chair := &Chair{}
-		if err := tx.GetContext(ctx, chair, `SELECT * FROM chairs WHERE id = ?`, ride.ChairID); err != nil {
+		chair, err := cachedChair(ctx, tx, ride.ChairID.String)
+		if err != nil {
 			return nil, false, err
 		}
 
