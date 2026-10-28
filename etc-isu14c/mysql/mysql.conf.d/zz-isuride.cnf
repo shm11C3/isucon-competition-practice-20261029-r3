@@ -2,3 +2,6 @@
 bind-address = 0.0.0.0
 max_connections = 1000
 innodb_buffer_pool_size = 2G
+skip-log-bin
+# Clean reboots flush the page cache; only an OS crash could lose the last second.
+innodb_flush_log_at_trx_commit = 2
