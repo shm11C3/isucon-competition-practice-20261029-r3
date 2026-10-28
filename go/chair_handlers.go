@@ -140,18 +140,6 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Lock the chair's running total before timestamping the new location, so
-	// concurrent coordinates of one chair are summed in created_at order.
-	distance := &chairDistance{}
-	hasDistance := true
-	if err := tx.GetContext(ctx, distance, `SELECT * FROM chair_distances WHERE chair_id = ? FOR UPDATE`, chair.ID); err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		hasDistance = false
-	}
-
 	// Record the coordinate after the ride queries, close to its commit. A slow
 	// lookup must not backdate a position that other requests cannot see yet.
 	chairLocationID := ulid.Make().String()
@@ -170,25 +158,22 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if hasDistance {
-		if _, err := tx.ExecContext(
-			ctx,
-			`UPDATE chair_distances SET total_distance = ?, total_distance_updated_at = ?, latitude = ?, longitude = ? WHERE chair_id = ?`,
-			distance.TotalDistance+abs(location.Latitude-distance.Latitude)+abs(location.Longitude-distance.Longitude),
-			location.CreatedAt, location.Latitude, location.Longitude, chair.ID,
-		); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-	} else {
-		if _, err := tx.ExecContext(
-			ctx,
-			`INSERT INTO chair_distances (chair_id, total_distance, total_distance_updated_at, latitude, longitude) VALUES (?, 0, ?, ?, ?)`,
-			chair.ID, location.CreatedAt, location.Latitude, location.Longitude,
-		); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
+	// One upsert keeps the running total without a locking read: a FOR UPDATE on a
+	// missing row takes a gap lock, and two new chairs posting their first
+	// coordinate at once deadlocked (R1 T-0011: bursts of 500 on this endpoint).
+	// MySQL evaluates the assignments left to right, so the distance uses the old position.
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO chair_distances (chair_id, total_distance, total_distance_updated_at, latitude, longitude) VALUES (?, 0, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			total_distance = total_distance + ABS(VALUES(latitude) - latitude) + ABS(VALUES(longitude) - longitude),
+			total_distance_updated_at = VALUES(total_distance_updated_at),
+			latitude = VALUES(latitude),
+			longitude = VALUES(longitude)`,
+		chair.ID, location.CreatedAt, location.Latitude, location.Longitude,
+	); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
 	}
 
 	if err := tx.Commit(); err != nil {
