@@ -177,7 +177,7 @@ type chairGetNotificationResponseData struct {
 	Status                string     `json:"status"`
 }
 
-func chairNotificationOnce(ctx context.Context, chair *Chair) (*chairGetNotificationResponseData, bool, error) {
+func chairNotificationOnce(ctx context.Context, chair *Chair) (*chairGetNotificationResponseData, bool, bool, error) {
 
 	ride := &Ride{}
 	yetSentRideStatus := RideStatus{}
@@ -185,22 +185,29 @@ func chairNotificationOnce(ctx context.Context, chair *Chair) (*chairGetNotifica
 
 	if err := db.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, false, nil
+			return nil, false, false, nil
 		}
-		return nil, false, err
+		return nil, false, false, err
 	}
 
 	// 未送信のうち最古のステータス、なければ最新のステータスを 1 クエリで決める
 	rideStatuses := []RideStatus{}
 	if err := db.SelectContext(ctx, &rideStatuses, `SELECT * FROM ride_statuses WHERE ride_id = ? ORDER BY created_at ASC`, ride.ID); err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	if len(rideStatuses) == 0 {
-		return nil, false, sql.ErrNoRows
+		return nil, false, false, sql.ErrNoRows
 	}
-	for _, rs := range rideStatuses {
+	more := false
+	for i, rs := range rideStatuses {
 		if rs.ChairSentAt == nil {
 			yetSentRideStatus = rs
+			for _, later := range rideStatuses[i+1:] {
+				if later.ChairSentAt == nil {
+					more = true
+					break
+				}
+			}
 			break
 		}
 	}
@@ -212,13 +219,13 @@ func chairNotificationOnce(ctx context.Context, chair *Chair) (*chairGetNotifica
 
 	user, err := cachedUser(ctx, db, ride.UserID)
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 
 	if yetSentRideStatus.ID != "" {
 		_, err := db.ExecContext(ctx, `UPDATE ride_statuses SET chair_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, yetSentRideStatus.ID)
 		if err != nil {
-			return nil, false, err
+			return nil, false, false, err
 		}
 	}
 
@@ -237,18 +244,18 @@ func chairNotificationOnce(ctx context.Context, chair *Chair) (*chairGetNotifica
 			Longitude: ride.DestinationLongitude,
 		},
 		Status: status,
-	}, yetSentRideStatus.ID != "", nil
+	}, yetSentRideStatus.ID != "", more, nil
 }
 
 func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	chair := ctx.Value("chair").(*Chair)
-	streamNotifications(w, r, "c:"+chair.ID, func() (any, string, bool, error) {
-		data, sent, err := chairNotificationOnce(ctx, chair)
+	streamNotifications(w, r, "c:"+chair.ID, func() (any, string, bool, bool, error) {
+		data, sent, more, err := chairNotificationOnce(ctx, chair)
 		if err != nil || data == nil {
-			return nil, "", sent, err
+			return nil, "", sent, more, err
 		}
-		return data, data.RideID + data.Status, sent, nil
+		return data, data.RideID + data.Status, sent, more, nil
 	})
 }
 
