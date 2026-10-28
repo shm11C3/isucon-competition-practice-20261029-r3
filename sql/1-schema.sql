@@ -134,3 +134,12 @@ CREATE TABLE coupons
   PRIMARY KEY (user_id, code)
 )
   COMMENT 'クーポンテーブル';
+
+CREATE INDEX idx_chairs_access_token ON chairs (access_token);
+CREATE INDEX idx_chairs_owner_id ON chairs (owner_id);
+CREATE INDEX idx_chair_locations_chair_created ON chair_locations (chair_id, created_at);
+CREATE INDEX idx_rides_chair_updated ON rides (chair_id, updated_at);
+CREATE INDEX idx_rides_user_created ON rides (user_id, created_at);
+CREATE INDEX idx_ride_statuses_ride_created ON ride_statuses (ride_id, created_at);
+CREATE INDEX idx_coupons_used_by ON coupons (used_by);
+CREATE INDEX idx_coupons_code ON coupons (code);
