@@ -65,6 +65,15 @@ func setup() http.Handler {
 		panic(err)
 	}
 	db = _db
+	// The flusher gets its own connections: waiting behind the shared pool
+	// during a burst delayed positions by seconds (R3 T-0008: code 26 and 31).
+	_flushDB, err := sqlx.Connect("mysql", dbConfig.FormatDSN())
+	if err != nil {
+		panic(err)
+	}
+	_flushDB.SetMaxOpenConns(2)
+	_flushDB.SetMaxIdleConns(2)
+	flushDB = _flushDB
 	startCoordinateFlusher()
 	db.SetMaxOpenConns(64)
 	db.SetMaxIdleConns(64)
