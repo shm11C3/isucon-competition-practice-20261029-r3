@@ -111,6 +111,7 @@ func setup() http.Handler {
 		mux.HandleFunc("GET /api/internal/matching", internalGetMatching)
 		mux.HandleFunc("POST /api/internal/notify", internalPostNotify)
 		mux.HandleFunc("POST /api/internal/supersede", internalPostSupersede)
+		mux.HandleFunc("POST /api/internal/authclear", internalPostAuthClear)
 	}
 
 	return mux
@@ -132,10 +133,12 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clearAuthCache()
 	if out, err := exec.Command("../sql/init.sh").CombinedOutput(); err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("failed to initialize: %s: %w", string(out), err))
 		return
 	}
+	clearAuthCache()
 
 	if _, err := db.ExecContext(ctx, "UPDATE settings SET value = ? WHERE name = 'payment_gateway_url'", req.PaymentServer); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
