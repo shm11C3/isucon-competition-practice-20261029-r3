@@ -1,52 +1,73 @@
 package main
 
 import (
-	"database/sql"
-	"errors"
 	"net/http"
 )
 
+type freeChair struct {
+	ID        string `db:"id"`
+	Speed     int    `db:"speed"`
+	Latitude  int    `db:"latitude"`
+	Longitude int    `db:"longitude"`
+}
+
 // このAPIをインスタンス内から一定間隔で叩かせることで、椅子とライドをマッチングさせる
+// 待ち時間の長いライドから順に、到着が最も早い空き椅子を割り当てる
 func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	// MEMO: 一旦最も待たせているリクエストに適当な空いている椅子マッチさせる実装とする。おそらくもっといい方法があるはず…
-	ride := &Ride{}
-	if err := db.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id IS NULL ORDER BY created_at LIMIT 1`); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
+
+	rides := []Ride{}
+	if err := db.SelectContext(ctx, &rides, `SELECT * FROM rides WHERE chair_id IS NULL ORDER BY created_at`); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-
-	matched := &Chair{}
-	empty := false
-	for i := 0; i < 10; i++ {
-		if err := db.GetContext(ctx, matched, "SELECT * FROM chairs INNER JOIN (SELECT id FROM chairs WHERE is_active = TRUE ORDER BY RAND() LIMIT 1) AS tmp ON chairs.id = tmp.id LIMIT 1"); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, err)
-		}
-
-		if err := db.GetContext(ctx, &empty, "SELECT COUNT(*) = 0 FROM (SELECT COUNT(chair_sent_at) = 6 AS completed FROM ride_statuses WHERE ride_id IN (SELECT id FROM rides WHERE chair_id = ?) GROUP BY ride_id) is_completed WHERE completed = FALSE", matched.ID); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		if empty {
-			break
-		}
-	}
-	if !empty {
+	if len(rides) == 0 {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
-	if _, err := db.ExecContext(ctx, "UPDATE rides SET chair_id = ? WHERE id = ?", matched.ID, ride.ID); err != nil {
+	// 空き椅子: 割り当て済みのすべてのライドで6状態すべてが椅子へ通知済み
+	chairs := []freeChair{}
+	if err := db.SelectContext(ctx, &chairs, `
+SELECT c.id, cm.speed, l.latitude, l.longitude
+FROM chairs c
+JOIN chair_models cm ON cm.name = c.model
+JOIN chair_locations l ON l.chair_id = c.id
+  AND l.created_at = (SELECT MAX(created_at) FROM chair_locations WHERE chair_id = c.id)
+WHERE c.is_active = TRUE
+  AND NOT EXISTS (
+    SELECT 1 FROM rides r
+    WHERE r.chair_id = c.id
+      AND (SELECT COUNT(chair_sent_at) FROM ride_statuses rs WHERE rs.ride_id = r.id) < 6
+  )`); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+
+	used := make(map[string]bool, len(chairs))
+	for _, ride := range rides {
+		best := -1
+		bestTime := 0
+		for i, c := range chairs {
+			if used[c.ID] || c.Speed <= 0 {
+				continue
+			}
+			t := calculateDistance(c.Latitude, c.Longitude, ride.PickupLatitude, ride.PickupLongitude) * 1000 / c.Speed
+			if best < 0 || t < bestTime {
+				best, bestTime = i, t
+			}
+		}
+		if best < 0 {
+			break
+		}
+		res, err := db.ExecContext(ctx, "UPDATE rides SET chair_id = ? WHERE id = ? AND chair_id IS NULL", chairs[best].ID, ride.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if n, _ := res.RowsAffected(); n == 1 {
+			used[chairs[best].ID] = true
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)
