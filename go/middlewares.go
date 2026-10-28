@@ -22,7 +22,12 @@ var authCache atomic.Pointer[authGeneration]
 
 func init() { authCache.Store(&authGeneration{}) }
 
-func clearAuthCacheLocal() { authCache.Store(&authGeneration{}) }
+// clearAuthCacheLocal also drops this host's queued chair positions: both belong
+// to the run that initialize ends.
+func clearAuthCacheLocal() {
+	authCache.Store(&authGeneration{})
+	dropPendingCoordinates()
+}
 
 func appAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
