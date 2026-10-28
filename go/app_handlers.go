@@ -841,23 +841,15 @@ func appGetNearbyChairs(w http.ResponseWriter, r *http.Request) {
 	err = db.SelectContext(
 		ctx,
 		&rows,
-		`SELECT c.id, c.name, c.model, cl.latitude, cl.longitude
+		// chair_distances holds each chair's latest coordinate; COMPLETED is written in the
+		// same transaction that sets rides.evaluation, so an unfinished ride has none.
+		`SELECT c.id, c.name, c.model, cd.latitude, cd.longitude
 		FROM chairs c
-		JOIN chair_locations cl ON cl.chair_id = c.id
+		JOIN chair_distances cd ON cd.chair_id = c.id
 		WHERE c.is_active = TRUE
-		  AND cl.id = (
-		    SELECT cl2.id FROM chair_locations cl2
-		    WHERE cl2.chair_id = c.id
-		    ORDER BY cl2.created_at DESC LIMIT 1
-		  )
 		  AND NOT EXISTS (
 		    SELECT 1 FROM rides r
-		    WHERE r.chair_id = c.id
-		      AND COALESCE((
-		        SELECT rs.status FROM ride_statuses rs
-		        WHERE rs.ride_id = r.id
-		        ORDER BY rs.created_at DESC LIMIT 1
-		      ), '') <> 'COMPLETED'
+		    WHERE r.chair_id = c.id AND r.evaluation IS NULL
 		  )
 		ORDER BY c.id`,
 	)
