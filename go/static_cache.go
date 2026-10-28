@@ -14,10 +14,11 @@ var (
 	fareByRide   sync.Map // ride ID -> int
 	chairByID    sync.Map // chair ID -> *Chair
 	userNameByID sync.Map // user ID -> *User
+	statsByRide  sync.Map // ride ID -> appGetNotificationResponseChairStats
 )
 
 func clearStaticCacheLocal() {
-	for _, m := range []*sync.Map{&fareByRide, &chairByID, &userNameByID} {
+	for _, m := range []*sync.Map{&fareByRide, &chairByID, &userNameByID, &statsByRide} {
 		m.Range(func(k, _ any) bool {
 			m.Delete(k)
 			return true
