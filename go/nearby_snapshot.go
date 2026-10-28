@@ -24,6 +24,7 @@ type nearbyChairRow struct {
 const freeChairSnapshotTTL = 200 * time.Millisecond
 
 var (
+	snapshotDB   *sqlx.DB
 	freeChairsMu sync.Mutex
 	freeChairs   []nearbyChairRow
 	freeChairsAt time.Time
@@ -44,7 +45,7 @@ func freeChairSnapshot(ctx context.Context) ([]nearbyChairRow, time.Time, error)
 	// without one; three indexed reads keep this cheap (a single NOT EXISTS over
 	// ride_statuses timed nearby requests out, R3 T-0036).
 	active := []nearbyChairRow{}
-	if err := db.SelectContext(ctx, &active, `SELECT c.id, c.name, c.model, cd.latitude, cd.longitude
+	if err := snapshotDB.SelectContext(ctx, &active, `SELECT c.id, c.name, c.model, cd.latitude, cd.longitude
 		FROM chairs c
 		JOIN chair_distances cd ON cd.chair_id = c.id
 		WHERE c.is_active = TRUE
@@ -55,7 +56,7 @@ func freeChairSnapshot(ctx context.Context) ([]nearbyChairRow, time.Time, error)
 		ID      string `db:"id"`
 		ChairID string `db:"chair_id"`
 	}{}
-	if err := db.SelectContext(ctx, &unfinished, `SELECT id, chair_id FROM rides WHERE evaluation IS NULL AND chair_id IS NOT NULL`); err != nil {
+	if err := snapshotDB.SelectContext(ctx, &unfinished, `SELECT id, chair_id FROM rides WHERE evaluation IS NULL AND chair_id IS NOT NULL`); err != nil {
 		return nil, time.Time{}, err
 	}
 	busy := map[string]bool{}
@@ -71,7 +72,7 @@ func freeChairSnapshot(ctx context.Context) ([]nearbyChairRow, time.Time, error)
 			return nil, time.Time{}, err
 		}
 		accepted := []string{}
-		if err := db.SelectContext(ctx, &accepted, query, args...); err != nil {
+		if err := snapshotDB.SelectContext(ctx, &accepted, query, args...); err != nil {
 			return nil, time.Time{}, err
 		}
 		for _, rideID := range accepted {

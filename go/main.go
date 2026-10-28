@@ -74,6 +74,16 @@ func setup() http.Handler {
 	_flushDB.SetMaxOpenConns(2)
 	_flushDB.SetMaxIdleConns(2)
 	flushDB = _flushDB
+	// The nearby-chairs snapshot is read under a lock that every nearby request
+	// waits on, so it must not queue behind the shared pool either (R3 T-0036:
+	// nearby requests timed out while the shared pool was saturated).
+	_snapshotDB, err := sqlx.Connect("mysql", dbConfig.FormatDSN())
+	if err != nil {
+		panic(err)
+	}
+	_snapshotDB.SetMaxOpenConns(2)
+	_snapshotDB.SetMaxIdleConns(2)
+	snapshotDB = _snapshotDB
 	startCoordinateFlusher()
 	db.SetMaxOpenConns(64)
 	db.SetMaxIdleConns(64)
