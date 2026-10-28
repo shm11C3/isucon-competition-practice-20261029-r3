@@ -155,6 +155,7 @@ func clearAuthCache() {
 	peers := strings.Split(os.Getenv("ISURIDE_PEERS"), ",")
 	if len(peers) == 1 && peers[0] == "" {
 		clearAuthCacheLocal()
+		clearChairTripCacheLocal()
 		return
 	}
 	var wg sync.WaitGroup
@@ -172,10 +173,12 @@ func clearAuthCache() {
 	}
 	wg.Wait()
 	clearAuthCacheLocal()
+	clearChairTripCacheLocal()
 }
 
 func internalPostAuthClear(w http.ResponseWriter, r *http.Request) {
 	clearAuthCacheLocal()
+	clearChairTripCacheLocal()
 	w.WriteHeader(http.StatusNoContent)
 }
 

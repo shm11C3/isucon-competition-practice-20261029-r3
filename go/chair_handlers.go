@@ -106,9 +106,9 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 
 	chair := ctx.Value("chair").(*Chair)
 
-	// A chair posts its coordinates one at a time, so the ride lookup, the
-	// status insert and the position upsert need no shared transaction: each
-	// statement commits on its own, which cuts the round trips of every tick.
+	// Ride metadata changes only at a ride boundary. While this host has a live
+	// chair stream, interior movement coordinates can use its versioned snapshot;
+	// endpoints and every uncertain cache state still read current DB state.
 	ride := struct {
 		ID                   string         `db:"id"`
 		UserID               string         `db:"user_id"`
@@ -117,29 +117,49 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		DestinationLatitude  int            `db:"destination_latitude"`
 		DestinationLongitude int            `db:"destination_longitude"`
 		Status               sql.NullString `db:"status"`
+		UpdatedAt            time.Time      `db:"updated_at"`
 	}{}
 	statusChanged := false
-	if err := db.GetContext(ctx, &ride, `
+	_, cacheToken, cacheDecision := lookupChairTripForCoordinate(chair.ID, req.Latitude, req.Longitude)
+	recordChairTripCacheDecision(cacheDecision)
+	if cacheDecision != chairTripCacheHit {
+		if err := db.GetContext(ctx, &ride, `
 SELECT r.id, r.user_id, r.pickup_latitude, r.pickup_longitude, r.destination_latitude, r.destination_longitude,
-       (SELECT rs.status FROM ride_statuses rs WHERE rs.ride_id = r.id ORDER BY rs.created_at DESC LIMIT 1) AS status
+       (SELECT rs.status FROM ride_statuses rs WHERE rs.ride_id = r.id ORDER BY rs.created_at DESC LIMIT 1) AS status,
+       r.updated_at
 FROM rides r WHERE r.chair_id = ? ORDER BY r.updated_at DESC LIMIT 1`, chair.ID); err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-	} else {
-		next := ""
-		if req.Latitude == ride.PickupLatitude && req.Longitude == ride.PickupLongitude && ride.Status.String == "ENROUTE" {
-			next = "PICKUP"
-		} else if req.Latitude == ride.DestinationLatitude && req.Longitude == ride.DestinationLongitude && ride.Status.String == "CARRYING" {
-			next = "ARRIVED"
-		}
-		if next != "" {
-			if _, err := db.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, next); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
 				writeError(w, http.StatusInternalServerError, err)
 				return
 			}
-			statusChanged = true
+			storeChairTripFromRead(chair.ID, cacheToken, nil)
+		} else {
+			storeChairTripFromRead(chair.ID, cacheToken, &chairTripSnapshot{
+				RideID: ride.ID, UserID: ride.UserID,
+				PickupLatitude: ride.PickupLatitude, PickupLongitude: ride.PickupLongitude,
+				DestinationLatitude: ride.DestinationLatitude, DestinationLongitude: ride.DestinationLongitude,
+				RideUpdatedAt: ride.UpdatedAt, Status: ride.Status.String,
+			})
+			next := ""
+			if req.Latitude == ride.PickupLatitude && req.Longitude == ride.PickupLongitude && ride.Status.String == "ENROUTE" {
+				next = "PICKUP"
+			} else if req.Latitude == ride.DestinationLatitude && req.Longitude == ride.DestinationLongitude && ride.Status.String == "CARRYING" {
+				next = "ARRIVED"
+			}
+			if next != "" {
+				if _, err := db.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, next); err != nil {
+					writeError(w, http.StatusInternalServerError, err)
+					return
+				}
+				ride.Status.String = next
+				syncChairTripAfterStatus(chair.ID, chairTripSnapshot{
+					RideID: ride.ID, UserID: ride.UserID,
+					PickupLatitude: ride.PickupLatitude, PickupLongitude: ride.PickupLongitude,
+					DestinationLatitude: ride.DestinationLatitude, DestinationLongitude: ride.DestinationLongitude,
+					RideUpdatedAt: ride.UpdatedAt, Status: next,
+				})
+				statusChanged = true
+			}
 		}
 	}
 
@@ -175,6 +195,7 @@ type chairGetNotificationResponseData struct {
 	PickupCoordinate      Coordinate `json:"pickup_coordinate"`
 	DestinationCoordinate Coordinate `json:"destination_coordinate"`
 	Status                string     `json:"status"`
+	rideUpdatedAt         time.Time  `json:"-"`
 }
 
 func chairNotificationOnce(ctx context.Context, chair *Chair) (*chairGetNotificationResponseData, bool, bool, error) {
@@ -243,15 +264,31 @@ func chairNotificationOnce(ctx context.Context, chair *Chair) (*chairGetNotifica
 			Latitude:  ride.DestinationLatitude,
 			Longitude: ride.DestinationLongitude,
 		},
-		Status: status,
+		Status:        status,
+		rideUpdatedAt: ride.UpdatedAt,
 	}, yetSentRideStatus.ID != "", more, nil
 }
 
 func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	chair := ctx.Value("chair").(*Chair)
+	generation := beginChairTripStream(chair.ID)
+	defer endChairTripStream(chair.ID, generation)
 	streamNotifications(w, r, "c:"+chair.ID, func() (any, string, bool, bool, error) {
+		token, ok := chairTripCacheReadToken(chair.ID, generation)
 		data, sent, more, err := chairNotificationOnce(ctx, chair)
+		if err == nil && ok {
+			var trip *chairTripSnapshot
+			if data != nil {
+				trip = &chairTripSnapshot{
+					RideID: data.RideID, UserID: data.User.ID,
+					PickupLatitude: data.PickupCoordinate.Latitude, PickupLongitude: data.PickupCoordinate.Longitude,
+					DestinationLatitude: data.DestinationCoordinate.Latitude, DestinationLongitude: data.DestinationCoordinate.Longitude,
+					RideUpdatedAt: data.rideUpdatedAt, Status: data.Status,
+				}
+			}
+			storeChairTripFromRead(chair.ID, token, trip)
+		}
 		if err != nil || data == nil {
 			return nil, "", sent, more, err
 		}
@@ -326,6 +363,14 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	if req.Status == "ENROUTE" || req.Status == "CARRYING" {
+		syncChairTripAfterStatus(chair.ID, chairTripSnapshot{
+			RideID: ride.ID, UserID: ride.UserID,
+			PickupLatitude: ride.PickupLatitude, PickupLongitude: ride.PickupLongitude,
+			DestinationLatitude: ride.DestinationLatitude, DestinationLongitude: ride.DestinationLongitude,
+			RideUpdatedAt: ride.UpdatedAt, Status: req.Status,
+		})
 	}
 	notify("c:"+chair.ID, "u:"+ride.UserID)
 
