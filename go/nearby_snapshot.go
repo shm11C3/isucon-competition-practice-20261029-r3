@@ -37,12 +37,17 @@ func freeChairSnapshot(ctx context.Context) ([]nearbyChairRow, time.Time, error)
 	at := time.Now()
 	// chair_distances holds each chair's latest coordinate; COMPLETED is written in the
 	// same transaction that sets rides.evaluation, so an unfinished ride has none.
+	// A chair counts as busy from its accept (ENROUTE) on, as the benchmarker
+	// counts it: a chair matched but not yet accepted is still listed, since the
+	// benchmarker expects every chair it sees idle in nearby results and only
+	// tolerates an accepted ride within 3 s (code 30/31 in world.go).
 	if err := db.SelectContext(ctx, &rows, `SELECT c.id, c.name, c.model, cd.latitude, cd.longitude
 		FROM chairs c
 		JOIN chair_distances cd ON cd.chair_id = c.id
 		WHERE c.is_active = TRUE
 		  AND NOT EXISTS (
 		    SELECT 1 FROM rides r
+		    JOIN ride_statuses rs ON rs.ride_id = r.id AND rs.status = 'ENROUTE'
 		    WHERE r.chair_id = c.id AND r.evaluation IS NULL
 		  )
 		ORDER BY c.id`); err != nil {
