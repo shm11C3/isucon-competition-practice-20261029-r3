@@ -5,3 +5,6 @@ innodb_buffer_pool_size = 2G
 skip-log-bin
 # Clean reboots flush the page cache; only an OS crash could lose the last second.
 innodb_flush_log_at_trx_commit = 2
+# isu14c is CPU-bound (2 vCPU at 100% during the benchmark); statement
+# instrumentation costs a share of that. Turn it back on to read digests.
+performance_schema = OFF
