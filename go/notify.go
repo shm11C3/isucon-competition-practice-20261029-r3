@@ -276,7 +276,10 @@ func streamNotifications(w http.ResponseWriter, r *http.Request, key string, onc
 		case <-ctx.Done():
 			return
 		case <-wake:
-		case <-time.After(time.Second):
+		case <-time.After(2 * time.Second):
+			// Every status change wakes its streams on all hosts; this only
+			// recovers a wake lost to a failed peer call within the benchmark's
+			// 3 s tolerance, and each read is a multi-query transaction.
 		}
 	}
 }
