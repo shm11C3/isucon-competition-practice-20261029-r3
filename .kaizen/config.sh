@@ -1,7 +1,7 @@
 . "$KAIZEN_PLUGIN_ROOT/presets/isucon14.sh"
 APP_HOST=isu14a
 APP_HOSTS="isu14c isu14a isu14b"
-DB_HOST=isu14a
+DB_HOST=isu14c
 NGINX_HOST=isu14a
 BENCH_HOST=isu14bench
 SSH_CONFIG=/srv/isucon/isu14-team-r2-20261029/ssh_config
