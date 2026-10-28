@@ -321,14 +321,19 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	// 最新ステータスが COMPLETED でないライドの数
-	continuingRideCount := 0
-	if err := tx.GetContext(ctx, &continuingRideCount, `SELECT COUNT(*) FROM rides r WHERE r.user_id = ? AND IFNULL((SELECT rs.status FROM ride_statuses rs WHERE rs.ride_id = r.id ORDER BY rs.created_at DESC LIMIT 1), '') <> 'COMPLETED'`, user.ID); err != nil {
+	// 最新ステータスが COMPLETED でないライドの数と、既存ライドの総数。
+	// COMPLETED is written in the transaction that sets rides.evaluation, so an
+	// unfinished ride is one without an evaluation.
+	var counts struct {
+		Total      int `db:"total"`
+		Continuing int `db:"continuing"`
+	}
+	if err := tx.GetContext(ctx, &counts, `SELECT COUNT(*) AS total, IFNULL(SUM(evaluation IS NULL), 0) AS continuing FROM rides WHERE user_id = ?`, user.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
-	if continuingRideCount > 0 {
+	if counts.Continuing > 0 {
 		writeError(w, http.StatusConflict, errors.New("ride already exists"))
 		return
 	}
@@ -352,11 +357,7 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var rideCount int
-	if err := tx.GetContext(ctx, &rideCount, `SELECT COUNT(*) FROM rides WHERE user_id = ? `, user.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
+	rideCount := counts.Total + 1
 
 	var coupon Coupon
 	if rideCount == 1 {
