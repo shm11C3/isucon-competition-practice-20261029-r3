@@ -8,6 +8,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/jmoiron/sqlx"
 )
 
 // Chair positions are written to chair_distances in batches. nginx sends all
@@ -28,6 +30,7 @@ var (
 	coordinates   []pendingCoordinate
 	// flushMu keeps one flush in the database at a time so batches keep their order.
 	flushMu sync.Mutex
+	flushDB *sqlx.DB
 )
 
 const coordinateFlushInterval = 50 * time.Millisecond
@@ -75,7 +78,7 @@ func flushCoordinates() {
 		latitude = VALUES(latitude),
 		longitude = VALUES(longitude)`)
 	for attempt := 0; ; attempt++ {
-		_, err := db.Exec(sb.String(), args...)
+		_, err := flushDB.Exec(sb.String(), args...)
 		if err == nil {
 			return
 		}
