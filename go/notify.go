@@ -112,6 +112,7 @@ func streamNotifications(w http.ResponseWriter, r *http.Request, key string, onc
 	ctx := r.Context()
 	deadline := time.Now().Add(25 * time.Second)
 	last := ""
+	first := true
 	for {
 		data, current, sent, err := once()
 		if err != nil {
@@ -120,6 +121,13 @@ func streamNotifications(w http.ResponseWriter, r *http.Request, key string, onc
 			}
 			return
 		}
+		if first && data == nil {
+			// The frontend's first fetch waits for one chunk; a comment gives it one.
+			// "data: null" would not do: the benchmarker fails to decode it.
+			fmt.Fprint(w, ": waiting\n\n")
+			flusher.Flush()
+		}
+		first = false
 		if data != nil && (sent || current != last) {
 			b, err := json.Marshal(data)
 			if err != nil {
