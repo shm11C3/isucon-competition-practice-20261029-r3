@@ -27,6 +27,7 @@ func init() { authCache.Store(&authGeneration{}) }
 func clearAuthCacheLocal() {
 	authCache.Store(&authGeneration{})
 	dropPendingCoordinates()
+	clearStaticCacheLocal()
 }
 
 func appAuthMiddleware(next http.Handler) http.Handler {

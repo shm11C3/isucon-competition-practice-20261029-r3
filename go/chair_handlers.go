@@ -210,8 +210,7 @@ func chairNotificationOnce(ctx context.Context, chair *Chair) (*chairGetNotifica
 		status = rideStatuses[len(rideStatuses)-1].Status
 	}
 
-	user := &User{}
-	err := db.GetContext(ctx, user, "SELECT * FROM users WHERE id = ?", ride.UserID)
+	user, err := cachedUser(ctx, db, ride.UserID)
 	if err != nil {
 		return nil, false, err
 	}
