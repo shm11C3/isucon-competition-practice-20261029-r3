@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -111,6 +112,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
+	statusChanged := false
 	ride := &Ride{}
 	if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
@@ -129,6 +131,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
+				statusChanged = true
 			}
 
 			if req.Latitude == ride.DestinationLatitude && req.Longitude == ride.DestinationLongitude && status == "CARRYING" {
@@ -136,6 +139,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
+				statusChanged = true
 			}
 		}
 	}
@@ -180,6 +184,9 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	if statusChanged {
+		notify("c:"+chair.ID, "u:"+ride.UserID)
+	}
 
 	writeJSON(w, http.StatusOK, &chairPostCoordinateResponse{
 		RecordedAt: location.CreatedAt.UnixMilli(),
@@ -204,9 +211,7 @@ type chairGetNotificationResponseData struct {
 	Status                string     `json:"status"`
 }
 
-func chairGetNotification(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	chair := ctx.Value("chair").(*Chair)
+func chairNotificationOnce(ctx context.Context, chair *Chair) (*chairGetNotificationResponseData, bool, error) {
 
 	ride := &Ride{}
 	yetSentRideStatus := RideStatus{}
@@ -214,24 +219,18 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 
 	if err := db.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusOK, &chairGetNotificationResponse{
-				RetryAfterMs: 500,
-			})
-			return
+			return nil, false, nil
 		}
-		writeError(w, http.StatusInternalServerError, err)
-		return
+		return nil, false, err
 	}
 
 	// 未送信のうち最古のステータス、なければ最新のステータスを 1 クエリで決める
 	rideStatuses := []RideStatus{}
 	if err := db.SelectContext(ctx, &rideStatuses, `SELECT * FROM ride_statuses WHERE ride_id = ? ORDER BY created_at ASC`, ride.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+		return nil, false, err
 	}
 	if len(rideStatuses) == 0 {
-		writeError(w, http.StatusInternalServerError, sql.ErrNoRows)
-		return
+		return nil, false, sql.ErrNoRows
 	}
 	for _, rs := range rideStatuses {
 		if rs.ChairSentAt == nil {
@@ -248,36 +247,43 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 	user := &User{}
 	err := db.GetContext(ctx, user, "SELECT * FROM users WHERE id = ?", ride.UserID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+		return nil, false, err
 	}
 
 	if yetSentRideStatus.ID != "" {
 		_, err := db.ExecContext(ctx, `UPDATE ride_statuses SET chair_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, yetSentRideStatus.ID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
+			return nil, false, err
 		}
 	}
 
-	writeJSON(w, http.StatusOK, &chairGetNotificationResponse{
-		Data: &chairGetNotificationResponseData{
-			RideID: ride.ID,
-			User: simpleUser{
-				ID:   user.ID,
-				Name: fmt.Sprintf("%s %s", user.Firstname, user.Lastname),
-			},
-			PickupCoordinate: Coordinate{
-				Latitude:  ride.PickupLatitude,
-				Longitude: ride.PickupLongitude,
-			},
-			DestinationCoordinate: Coordinate{
-				Latitude:  ride.DestinationLatitude,
-				Longitude: ride.DestinationLongitude,
-			},
-			Status: status,
+	return &chairGetNotificationResponseData{
+		RideID: ride.ID,
+		User: simpleUser{
+			ID:   user.ID,
+			Name: fmt.Sprintf("%s %s", user.Firstname, user.Lastname),
 		},
-		RetryAfterMs: 500,
+		PickupCoordinate: Coordinate{
+			Latitude:  ride.PickupLatitude,
+			Longitude: ride.PickupLongitude,
+		},
+		DestinationCoordinate: Coordinate{
+			Latitude:  ride.DestinationLatitude,
+			Longitude: ride.DestinationLongitude,
+		},
+		Status: status,
+	}, yetSentRideStatus.ID != "", nil
+}
+
+func chairGetNotification(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	chair := ctx.Value("chair").(*Chair)
+	streamNotifications(w, r, "c:"+chair.ID, func() (any, string, bool, error) {
+		data, sent, err := chairNotificationOnce(ctx, chair)
+		if err != nil || data == nil {
+			return nil, "", sent, err
+		}
+		return data, data.RideID + data.Status, sent, nil
 	})
 }
 
@@ -349,6 +355,7 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	notify("c:"+chair.ID, "u:"+ride.UserID)
 
 	w.WriteHeader(http.StatusNoContent)
 }
