@@ -82,6 +82,7 @@ WHERE c.is_active = TRUE`); err != nil {
 		}
 		if n, _ := res.RowsAffected(); n == 1 {
 			used[chairs[best].ID] = true
+			notify("c:"+chairs[best].ID, "u:"+ride.UserID)
 		}
 	}
 
