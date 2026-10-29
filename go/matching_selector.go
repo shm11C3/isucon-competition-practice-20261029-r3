@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	urgentRideAge                = 2 * time.Second
+	urgentRideAge                = 8 * time.Second
 	globalChairCandidatesPerRide = 4
 )
 
@@ -54,7 +54,7 @@ func nearestAvailableChair(ride Ride, chairs []freeChair, usedChairs []bool) int
 }
 
 // selectAgeAwareChairMatches keeps FIFO-nearest assignment for requests waiting
-// at least two seconds. It then greedily consumes the globally shortest ETA edges
+// at least eight seconds. It then greedily consumes the globally shortest ETA edges
 // among the top four chairs per remaining ride. FIFO-nearest fallback preserves
 // full utilization when the sparse edge set cannot match every ride/chair.
 func selectAgeAwareChairMatches(rides []Ride, chairs []freeChair, now time.Time) []matchingPair {

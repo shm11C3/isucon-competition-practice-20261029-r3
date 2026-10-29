@@ -30,6 +30,38 @@ func TestAgeAwareGlobalMatchingUsesGlobalETAAndUrgentFIFO(t *testing.T) {
 	}
 }
 
+func TestAgeAwareMatchingKeepsETAWindowUntilUrgency(t *testing.T) {
+	now := time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)
+	chairs := []freeChair{
+		{ID: "fast", Speed: 10, Latitude: 0, Longitude: 0},
+		{ID: "slow", Speed: 1, Latitude: 0, Longitude: 10},
+	}
+	rides := []Ride{
+		{ID: "older", PickupLatitude: 0, PickupLongitude: 5, CreatedAt: now.Add(-7 * time.Second)},
+		{ID: "younger", PickupLatitude: 0, PickupLongitude: 1, CreatedAt: now.Add(-time.Second)},
+	}
+	pairs := selectAgeAwareChairMatches(rides, chairs, now)
+	if len(pairs) != 2 || pairs[0] != (matchingPair{rideIndex: 1, chairIndex: 0}) || pairs[1] != (matchingPair{rideIndex: 0, chairIndex: 1}) {
+		t.Fatalf("pre-urgency global ETA assignments = %#v, want younger ride on fast then older on slow", pairs)
+	}
+}
+
+func TestAgeAwareMatchingUsesFIFOAfterUrgencyConsumesAllChairs(t *testing.T) {
+	now := time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)
+	chairs := []freeChair{
+		{ID: "fast", Speed: 10, Latitude: 0, Longitude: 0},
+		{ID: "slow", Speed: 1, Latitude: 0, Longitude: 10},
+	}
+	rides := []Ride{
+		{ID: "oldest", PickupLatitude: 0, PickupLongitude: 5, CreatedAt: now.Add(-9 * time.Second)},
+		{ID: "next", PickupLatitude: 0, PickupLongitude: 1, CreatedAt: now.Add(-urgentRideAge)},
+	}
+	pairs := selectAgeAwareChairMatches(rides, chairs, now)
+	if len(pairs) != 2 || pairs[0] != (matchingPair{rideIndex: 0, chairIndex: 0}) || pairs[1] != (matchingPair{rideIndex: 1, chairIndex: 1}) {
+		t.Fatalf("urgent FIFO assignments = %#v, want oldest ride on nearest chair first and every chair used", pairs)
+	}
+}
+
 func TestAgeAwareGlobalMatchingUniqueZeroSpeedEmptyAndFallback(t *testing.T) {
 	now := time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)
 	chairs := []freeChair{
