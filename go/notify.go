@@ -176,6 +176,35 @@ func clearAuthCache() {
 	clearChairTripCacheLocal()
 }
 
+// dropFreeChairSnapshots makes every app host read its next free-chair list
+// from the database, and returns once they all answered.
+func dropFreeChairSnapshots() {
+	peers := strings.Split(os.Getenv("ISURIDE_PEERS"), ",")
+	if len(peers) == 1 && peers[0] == "" {
+		dropFreeChairSnapshot()
+		return
+	}
+	var wg sync.WaitGroup
+	for _, peer := range peers {
+		wg.Add(1)
+		go func(peer string) {
+			defer wg.Done()
+			res, err := peerClient.Post("http://"+peer+"/api/internal/nearbydrop", "text/plain", nil)
+			if err != nil {
+				return
+			}
+			io.Copy(io.Discard, res.Body)
+			res.Body.Close()
+		}(peer)
+	}
+	wg.Wait()
+}
+
+func internalPostNearbyDrop(w http.ResponseWriter, r *http.Request) {
+	dropFreeChairSnapshot()
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func internalPostAuthClear(w http.ResponseWriter, r *http.Request) {
 	clearAuthCacheLocal()
 	clearChairTripCacheLocal()

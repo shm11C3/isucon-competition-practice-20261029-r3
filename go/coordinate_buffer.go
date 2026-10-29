@@ -49,11 +49,41 @@ func dropPendingCoordinates() {
 	coordinates = nil
 	coordinatesMu.Unlock()
 	flushMu.Unlock()
+	placedChairs.Range(func(k, _ any) bool { placedChairs.Delete(k); return true })
 }
 
 func flushCoordinates() {
 	flushMu.Lock()
 	defer flushMu.Unlock()
+	flushLocked()
+}
+
+// placedChairs are the chairs this host has written a position for since start
+// or initialize. A chair's coordinates all come to one host (see nginx), so the
+// first one seen here is the chair's first since activation.
+var placedChairs sync.Map
+
+// placeCoordinate stores a chair's position. A new chair's first position is
+// written before the chair is answered, and every host forgets its free-chair
+// list: the benchmark counts a chair as waiting for a ride from the moment its
+// activation returns, and a nearby-chairs answer that still lacks it (one
+// buffer interval plus one list interval, about 250 ms) is a missing chair.
+// Practice R3: 72 of 76 such errors in one run were chairs 0-300 ms after
+// activation. Later positions are batched.
+func placeCoordinate(c pendingCoordinate) {
+	if _, ok := placedChairs.Load(c.chairID); ok {
+		queueCoordinate(c)
+		return
+	}
+	flushMu.Lock()
+	queueCoordinate(c)
+	flushLocked()
+	flushMu.Unlock()
+	placedChairs.Store(c.chairID, struct{}{})
+	dropFreeChairSnapshots()
+}
+
+func flushLocked() {
 	coordinatesMu.Lock()
 	batch := coordinates
 	coordinates = nil

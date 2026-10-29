@@ -122,6 +122,7 @@ func setup() http.Handler {
 		mux.HandleFunc("POST /api/internal/notify", internalPostNotify)
 		mux.HandleFunc("POST /api/internal/supersede", internalPostSupersede)
 		mux.HandleFunc("POST /api/internal/authclear", internalPostAuthClear)
+		mux.HandleFunc("POST /api/internal/nearbydrop", internalPostNearbyDrop)
 	}
 
 	return mux

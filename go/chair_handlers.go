@@ -168,7 +168,7 @@ FROM rides r WHERE r.chair_id = ? ORDER BY r.updated_at DESC LIMIT 1`, chair.ID)
 	// the same time the chair was told (see coordinate_buffer.go).
 	recordedAt := time.Now().Truncate(time.Microsecond)
 
-	queueCoordinate(pendingCoordinate{chairID: chair.ID, recordedAt: recordedAt, latitude: req.Latitude, longitude: req.Longitude})
+	placeCoordinate(pendingCoordinate{chairID: chair.ID, recordedAt: recordedAt, latitude: req.Latitude, longitude: req.Longitude})
 
 	if statusChanged {
 		notify("c:"+chair.ID, "u:"+ride.UserID)
