@@ -19,6 +19,30 @@ type matchingEdge struct {
 	rideIndex  int
 	chairIndex int
 	eta        int
+	// timePerScore is the chair time the pair takes per point it earns, scaled.
+	timePerScore int64
+}
+
+// The benchmark scores a completed ride 500 + 100 per unit carried + 10 per unit
+// driven to the pickup, and a chair is busy for the pickup, the carry and a fixed
+// handover (accept, arrival, evaluation, payment, next match: about 1.5 s, 50
+// ticks). Pickup distance alone ignores that a long ride earns twice as much per
+// chair second as a short one.
+const handoverETA = 50 * 1000
+
+func edgeTimePerScore(ride Ride, chair freeChair, eta int) int64 {
+	pickup := calculateDistance(chair.Latitude, chair.Longitude, ride.PickupLatitude, ride.PickupLongitude)
+	carry := calculateDistance(ride.PickupLatitude, ride.PickupLongitude, ride.DestinationLatitude, ride.DestinationLongitude)
+	busy := int64(eta) + int64(carry)*1000/int64(chair.Speed) + handoverETA
+	score := int64(500 + 100*carry + 10*pickup)
+	return busy * 1000 / score
+}
+
+func matchingValueLess(a, b matchingEdge) bool {
+	if a.timePerScore != b.timePerScore {
+		return a.timePerScore < b.timePerScore
+	}
+	return matchingEdgeLess(a, b)
 }
 
 func matchingEdgeLess(a, b matchingEdge) bool {
@@ -54,8 +78,8 @@ func nearestAvailableChair(ride Ride, chairs []freeChair, usedChairs []bool) int
 }
 
 // selectAgeAwareChairMatches keeps FIFO-nearest assignment for requests waiting
-// at least eight seconds. It then greedily consumes the globally shortest ETA edges
-// among the top four chairs per remaining ride. FIFO-nearest fallback preserves
+// at least eight seconds. It then greedily consumes, among the top four chairs per
+// remaining ride by ETA, the edges with the least chair time per point earned. FIFO-nearest fallback preserves
 // full utilization when the sparse edge set cannot match every ride/chair.
 func selectAgeAwareChairMatches(rides []Ride, chairs []freeChair, now time.Time) []matchingPair {
 	if len(rides) == 0 || len(chairs) == 0 {
@@ -97,7 +121,7 @@ func selectAgeAwareChairMatches(rides []Ride, chairs []freeChair, now time.Time)
 			if !ok {
 				continue
 			}
-			edge := matchingEdge{rideIndex: rideIndex, chairIndex: chairIndex, eta: eta}
+			edge := matchingEdge{rideIndex: rideIndex, chairIndex: chairIndex, eta: eta, timePerScore: edgeTimePerScore(ride, chair, eta)}
 			if len(top) == k && !matchingEdgeLess(edge, top[k-1]) {
 				continue
 			}
@@ -115,7 +139,9 @@ func selectAgeAwareChairMatches(rides []Ride, chairs []freeChair, now time.Time)
 		}
 		edges = append(edges, top...)
 	}
-	sort.Slice(edges, func(i, j int) bool { return matchingEdgeLess(edges[i], edges[j]) })
+	// Each ride keeps its nearest chairs; among those pairs the ones that earn the
+	// most per chair second go first.
+	sort.Slice(edges, func(i, j int) bool { return matchingValueLess(edges[i], edges[j]) })
 	for _, edge := range edges {
 		if usedRides[edge.rideIndex] || usedChairs[edge.chairIndex] {
 			continue

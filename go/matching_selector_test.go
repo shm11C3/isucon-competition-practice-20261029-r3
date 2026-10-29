@@ -16,8 +16,10 @@ func TestAgeAwareGlobalMatchingUsesGlobalETAAndUrgentFIFO(t *testing.T) {
 		{ID: "younger", PickupLatitude: 0, PickupLongitude: 1, CreatedAt: now.Add(-time.Second)},
 	}
 	pairs := selectAgeAwareChairMatches(rides, chairs, now)
-	if len(pairs) != 2 || pairs[0] != (matchingPair{rideIndex: 1, chairIndex: 0}) || pairs[1] != (matchingPair{rideIndex: 0, chairIndex: 1}) {
-		t.Fatalf("global ETA/fallback assignments = %#v, want younger ride on fast then older on slow", pairs)
+	// The fixed handover dominates these short trips, so the ride that earns more
+	// (the longer carry back to the origin) takes the fast chair.
+	if len(pairs) != 2 || pairs[0] != (matchingPair{rideIndex: 0, chairIndex: 0}) || pairs[1] != (matchingPair{rideIndex: 1, chairIndex: 1}) {
+		t.Fatalf("global value/fallback assignments = %#v, want the longer ride on fast then the other on slow", pairs)
 	}
 
 	urgentRides := []Ride{
@@ -41,8 +43,8 @@ func TestAgeAwareMatchingKeepsETAWindowUntilUrgency(t *testing.T) {
 		{ID: "younger", PickupLatitude: 0, PickupLongitude: 1, CreatedAt: now.Add(-time.Second)},
 	}
 	pairs := selectAgeAwareChairMatches(rides, chairs, now)
-	if len(pairs) != 2 || pairs[0] != (matchingPair{rideIndex: 1, chairIndex: 0}) || pairs[1] != (matchingPair{rideIndex: 0, chairIndex: 1}) {
-		t.Fatalf("pre-urgency global ETA assignments = %#v, want younger ride on fast then older on slow", pairs)
+	if len(pairs) != 2 || pairs[0] != (matchingPair{rideIndex: 0, chairIndex: 0}) || pairs[1] != (matchingPair{rideIndex: 1, chairIndex: 1}) {
+		t.Fatalf("pre-urgency global value assignments = %#v, want the longer ride on fast then the other on slow", pairs)
 	}
 }
 
@@ -108,5 +110,18 @@ func BenchmarkAgeAwareGlobalMatching700x500(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = selectAgeAwareChairMatches(rides, chairs, now)
+	}
+}
+
+func TestGlobalMatchingPrefersMoreScorePerChairTime(t *testing.T) {
+	now := time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)
+	chairs := []freeChair{{ID: "only", Speed: 3, Latitude: 0, Longitude: 0}}
+	rides := []Ride{
+		{ID: "short", PickupLatitude: 0, PickupLongitude: 2, DestinationLatitude: 0, DestinationLongitude: 12, CreatedAt: now.Add(-time.Second)},
+		{ID: "long", PickupLatitude: 0, PickupLongitude: 4, DestinationLatitude: 0, DestinationLongitude: 204, CreatedAt: now.Add(-time.Second)},
+	}
+	pairs := selectAgeAwareChairMatches(rides, chairs, now)
+	if len(pairs) != 1 || pairs[0] != (matchingPair{rideIndex: 1, chairIndex: 0}) {
+		t.Fatalf("assignments = %#v, want the long ride despite its farther pickup", pairs)
 	}
 }
