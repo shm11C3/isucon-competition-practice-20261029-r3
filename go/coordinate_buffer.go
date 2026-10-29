@@ -64,13 +64,15 @@ func flushCoordinates() {
 var placedChairs sync.Map
 
 // placeCoordinate stores a chair's position. A new chair's first position is
-// written before the chair is answered, and every host forgets its free-chair
+// written before the chair is answered and added to every host's free-chair
 // list: the benchmark counts a chair as waiting for a ride from the moment its
 // activation returns, and a nearby-chairs answer that still lacks it (one
 // buffer interval plus one list interval, about 250 ms) is a missing chair.
 // Practice R3: 72 of 76 such errors in one run were chairs 0-300 ms after
-// activation. Later positions are batched.
-func placeCoordinate(c pendingCoordinate) {
+// activation. Dropping the lists instead made every new chair cost each host a
+// full re-read, and the late-run bursts of new chairs timed nearby-chairs out.
+// Later positions are batched.
+func placeCoordinate(c pendingCoordinate, chair *Chair) {
 	if _, ok := placedChairs.Load(c.chairID); ok {
 		queueCoordinate(c)
 		return
@@ -80,7 +82,7 @@ func placeCoordinate(c pendingCoordinate) {
 	flushLocked()
 	flushMu.Unlock()
 	placedChairs.Store(c.chairID, struct{}{})
-	dropFreeChairSnapshots()
+	addFreeChairEverywhere(nearbyChairRow{ID: chair.ID, Name: chair.Name, Model: chair.Model, Latitude: c.latitude, Longitude: c.longitude})
 }
 
 func flushLocked() {

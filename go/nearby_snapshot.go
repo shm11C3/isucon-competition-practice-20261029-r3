@@ -58,3 +58,22 @@ func dropFreeChairSnapshot() {
 	freeChairs, freeChairsAt = nil, time.Time{}
 	freeChairsMu.Unlock()
 }
+
+// addFreeChair adds a chair that just got its first position to the current
+// list. A list read that started before the position was written is still in
+// progress while this waits for the lock, so it cannot overwrite the addition;
+// a read that started after it already has the chair.
+func addFreeChair(row nearbyChairRow) {
+	freeChairsMu.Lock()
+	defer freeChairsMu.Unlock()
+	if freeChairsAt.IsZero() {
+		return
+	}
+	for _, r := range freeChairs {
+		if r.ID == row.ID {
+			return
+		}
+	}
+	// Copy: callers keep reading the slice they were given.
+	freeChairs = append(freeChairs[:len(freeChairs):len(freeChairs)], row)
+}

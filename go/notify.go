@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -176,12 +177,16 @@ func clearAuthCache() {
 	clearChairTripCacheLocal()
 }
 
-// dropFreeChairSnapshots makes every app host read its next free-chair list
-// from the database, and returns once they all answered.
-func dropFreeChairSnapshots() {
+// addFreeChairEverywhere puts a new chair into every app host's free-chair
+// list, and returns once they all answered.
+func addFreeChairEverywhere(row nearbyChairRow) {
 	peers := strings.Split(os.Getenv("ISURIDE_PEERS"), ",")
 	if len(peers) == 1 && peers[0] == "" {
-		dropFreeChairSnapshot()
+		addFreeChair(row)
+		return
+	}
+	body, err := json.Marshal(row)
+	if err != nil {
 		return
 	}
 	var wg sync.WaitGroup
@@ -189,7 +194,7 @@ func dropFreeChairSnapshots() {
 		wg.Add(1)
 		go func(peer string) {
 			defer wg.Done()
-			res, err := peerClient.Post("http://"+peer+"/api/internal/nearbydrop", "text/plain", nil)
+			res, err := peerClient.Post("http://"+peer+"/api/internal/nearbyadd", "application/json", bytes.NewReader(body))
 			if err != nil {
 				return
 			}
@@ -200,8 +205,13 @@ func dropFreeChairSnapshots() {
 	wg.Wait()
 }
 
-func internalPostNearbyDrop(w http.ResponseWriter, r *http.Request) {
-	dropFreeChairSnapshot()
+func internalPostNearbyAdd(w http.ResponseWriter, r *http.Request) {
+	row := nearbyChairRow{}
+	if err := json.NewDecoder(r.Body).Decode(&row); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	addFreeChair(row)
 	w.WriteHeader(http.StatusNoContent)
 }
 
